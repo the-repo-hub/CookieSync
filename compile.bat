@@ -1,0 +1,1 @@
+pyinstaller --onefile main.py --ico=reso-2-logo-png-transparent.ico --name=reso --windowed && venv-32\Scripts\pyinstaller.exe --onefile main.py --ico=reso-2-logo-png-transparent.ico --name=reso32 --windowed
