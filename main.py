@@ -1,12 +1,13 @@
-import configparser
-import ctypes
 import time
-from subprocess import CREATE_NO_WINDOW
+from configparser import ConfigParser, SectionProxy
 from sys import exit
+from typing import Optional, Tuple, Dict
 
-import selenium.webdriver
 from selenium.common.exceptions import NoSuchWindowException, WebDriverException, NoSuchElementException, \
     UnexpectedAlertPresentException, InvalidSessionIdException, InvalidCookieDomainException
+from selenium.webdriver import Chrome
+from selenium.webdriver import Edge
+from selenium.webdriver import Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -18,211 +19,164 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 from ResoBot import AccountManager, raise_error
 
 
-class GetValidBrowser:
-    dct = {
-        'Firefox': [selenium.webdriver.Firefox, FirefoxService, FirefoxOptions],
-        'Chrome': [selenium.webdriver.Chrome, ChromeService, ChromeOptions],
-        'Edge': [selenium.webdriver.Edge, EdgeService, EdgeOptions]
+class Browser:
+    browserDictionary = {
+        'Firefox': [Firefox, FirefoxService, FirefoxOptions],
+        'Chrome': [Chrome, ChromeService, ChromeOptions],
+        'Edge': [Edge, EdgeService, EdgeOptions]
     }
 
-    def __init__(self, ini_options):
+    def __init__(self, name: str, user_agent: str):
+        self.name = name
         try:
-            self.ini_browser = ini_options['options']['browser'].capitalize()
-            self.class_ = self.dct[self.ini_browser][0]
-
-            self.service = self.dct[self.ini_browser][1](log_path='NUL')
-            self.service.creation_flags = CREATE_NO_WINDOW
-
-            self.options = self.dct[self.ini_browser][2]()
-
-            if self.ini_browser == 'Firefox':
-                self.options.set_preference("general.useragent.override", ini_options['options']['user-agent'])
-            else:
-                self.options.add_argument(f"--user-agent='{ini_options['options']['user-agent']}'")
+            self.klass = self.browserDictionary[name][0]
         except KeyError:
-            raise_error("Не найден подходящий браузер")
+            raise_error(f'Недоступный браузер {name}')
+        self.service = self.browserDictionary[name][1]
+        self.options = self.browserDictionary[name][2]
+        if name == 'Firefox':
+            self.options.set_preference("general.useragent.override", user_agent)
+        else:
+            self.options.add_argument(f"--user-agent='{user_agent}'")
 
 
-def get_ini():
-    try:
-        ini_options = configparser.ConfigParser()
+class BrowserMeta(type):
+
+    @staticmethod
+    def get_ini_options() -> Optional[SectionProxy]:
+        ini_options = ConfigParser()
         result = ini_options.read('reso.ini', encoding='UTF-8')
-
         # нет файла
         if not result:
             raise_error("Не найден файл reso.ini")
+        try:
+            options = ini_options['options']
+        except KeyError:
+            raise_error("Проблемы с ини-файлом, не найдено поле options")
+        else:
+            for line in options:
+                if line != 'hash' or line != 'browser' or line != 'user-agent':
+                    raise_error(f'Проблемы с ини-файлом, поле {line} не валидно')
+            return options
 
-        # проверка полей в options. Если нет options, то вызывается ошибка
-        for line in ini_options['options']:
-            if not (line == 'hash' or line == 'browser' or line == 'user-agent'):
-                raise_error(f"Проблемы с ини-файлом, поле {line} не валидно")
+    def __new__(cls, name: str, bases: Tuple, attrs: Dict):
+        options = cls.get_ini_options()
+        browser = Browser(name=options['browser'], user_agent=options['user-agent'])
+        attrs.update(
+            {
+                'service': browser.service,
+                'options': browser.options,
+                'ini_options': options,
+            }
+        )
+        bases = (browser.klass,)
+        return super().__new__(cls, name, bases, attrs)
 
-        return ini_options
 
-    except KeyError:
-        raise_error("Проблемы с ини-файлом, не найдено поле options")
+class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
+    url_main = 'https://office.reso.ru/'
+    manager = AccountManager()
 
-def get_reso_class():
-    ini_options = get_ini()
-    browser = GetValidBrowser(ini_options)
+    # will fill in meta:
+    ini_options = Dict
+    service = None
+    options = None
 
-    class ResoBrowser(browser.class_):
+    def __init__(self):
+        super().__init__(service=self.service, options=self.options)
+        self.need_to_set_telegram_cookies = False
+        self.hash = self.ini_options['hash']
+        self.last_cookies = self.manager[self.hash]
+        if not self.last_cookies:
+            self.quit()
+            raise_error('Невалидный хэш')
 
-        url_main = 'https://office.reso.ru/'
-        manager = AccountManager()
+    def delete_reso_cookies(self):
+        self.delete_cookie('ASP.NET_SessionId')
+        self.delete_cookie('ResoOffice60')
 
-        def __init__(self):
-            super().__init__(service=browser.service, options=browser.options)
+    def get_and_insert_cookies(self):
+        tele_cookies = self.manager[self.hash]
+        if not tele_cookies:
+            self.quit()
+            raise_error('Невалидный хэш')
+        self.delete_reso_cookies()
+        for line in tele_cookies:
+            self.add_cookie(line)
+
+    def find_element(self, *args, **kwargs):
+        try:
+            return super().find_element(*args, **kwargs)
+        except NoSuchElementException:
+            return None
+
+    def auth_complete(self):
+        if 'reso.ru' in self.current_url and self.url_main + 'login' not in self.current_url:
+            welcome = self.find_element(By.XPATH,
+                                        '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')  # welcome msg
+            qr = self.find_element(By.XPATH, '//*[@id="qrImage"]')  # qr
+            if not welcome and not qr:
+                return True
+        return False
+
+    def get_cookies(self):
+        cookies = {
+            'ASP.NET_SessionId': self.get_cookie('ASP.NET_SessionId'),
+            'ResoOffice60': self.get_cookie('ResoOffice60')
+        }
+        if cookies.get('ResoOffice60'):
+            cookies['ResoOffice60'].pop('domain')
+            cookies['ResoOffice60']['sameSite'] = 'None'
+        if cookies.get('ASP.NET_SessionId'):
+            cookies['ASP.NET_SessionId'].pop('domain')
+            cookies['ASP.NET_SessionId']['sameSite'] = 'None'
+        return cookies
+
+    def logged_in(self):
+        tele_cookies = self.manager[self.hash]
+        browser_cookies = self.get_cookies()
+
+        if self.need_to_overwrite_cookies and None not in get:
+            self.manager[self.hash] = self.get_cookies()
             self.need_to_overwrite_cookies = False
-            self.hash = ini_options['options']['hash']
 
-            self.last_cookies = self.manager[self.hash]
-            if not self.last_cookies:
-                self.quit()
-                raise_error('Невалидный хэш')
+        if not tele_cookies:
+            self.quit()
+            raise_error('Невалидный хэш')
 
-        def delete_reso_cookies(self):
-            self.delete_cookie('ASP.NET_SessionId')
-            self.delete_cookie('ResoOffice60')
+        elif self.last_cookies != get:
+            self.manager[self.hash] = get
+            self.last_cookies = get
 
-        def get_and_insert_cookies(self):
-
-            tele_cookies = self.manager[self.hash]
-
-            if not tele_cookies:
-                self.quit()
-                raise_error('Невалидный хэш')
-
+        elif get != tele_cookies:
             self.delete_reso_cookies()
-
             for line in tele_cookies:
                 self.add_cookie(line)
+            self.last_cookies = self.get_cookies()
 
-            self.get(self.url_main)
+    def logged_out(self):
+        tele_cookies = self.manager[self.hash]
+        if not tele_cookies:
+            self.quit()
+            raise_error('Невалидный хэш')
+        elif self.last_cookies != tele_cookies:
+            self.get_and_insert_cookies()
+            self.last_cookies = tele_cookies
 
-            if not self.auth_complete():
-                self.delete_reso_cookies()
+    def run(self) -> None:
+        self.get(self.url_main)
+        self.get_and_insert_cookies() # without refreshing
+        self.get(self.url_main)
+        while True:
+            if self.auth_complete():
+                self.logged_in()
+            else:
+                self.logged_out()
+            time.sleep(1)
 
-            self.need_to_overwrite_cookies = False
-
-        def find_element(self, *args, **kwargs):
-            try:
-                return super().find_element(*args, **kwargs)
-            except NoSuchElementException:
-                return None
-
-        def auth_complete(self):
-            if 'reso.ru' in self.current_url and self.url_main + 'login' not in self.current_url:
-                welcome = self.find_element(By.XPATH,
-                                            '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')  # welcome msg
-                qr = self.find_element(By.XPATH, '//*[@id="qrImage"]')  # qr
-                if not welcome and not qr:
-                    return True
-            return False
-
-        def get_cookies(self):
-            result = [self.get_cookie('ASP.NET_SessionId'), self.get_cookie('ResoOffice60')]
-            if None not in result:
-                result[0].pop('domain')
-                result[1].pop('domain')
-                result[0]['sameSite'] = 'None'
-                result[1]['sameSite'] = 'None'
-            return result
-
-        def run(self):
-            self.get(self.url_main)  # костылек, без которого не вставляются куки
-            first_opening = True
-
-            while True:
-                try:
-                    if self.auth_complete():
-                        first_opening = True
-                        time.sleep(1)
-                        tele_cookies = self.manager[self.hash]
-                        get = self.get_cookies()
-
-                        if self.need_to_overwrite_cookies and None not in get:
-                            self.manager[self.hash] = self.get_cookies()
-                            self.need_to_overwrite_cookies = False
-
-                        if not tele_cookies:
-                            self.quit()
-                            raise_error('Невалидный хэш')
-
-                        elif None in get:
-                            continue
-
-                        elif self.last_cookies != get:
-                            self.manager[self.hash] = get
-                            self.last_cookies = get
-
-                        elif get != tele_cookies:
-                            self.delete_reso_cookies()
-                            for line in tele_cookies:
-                                self.add_cookie(line)
-                            self.last_cookies = self.get_cookies()
-
-                    else:
-
-                        if first_opening:
-                            self.get_and_insert_cookies()
-                            first_opening = False
-                            continue
-
-                        time.sleep(1)
-
-                        self.need_to_overwrite_cookies = True
-
-                        tele_cookies = self.manager[self.hash]
-                        if not tele_cookies:
-                            self.quit()
-                            raise_error('Невалидный хэш')
-                        elif self.last_cookies != tele_cookies:
-                            self.get_and_insert_cookies()
-                            self.last_cookies = tele_cookies
-
-                except NoSuchWindowException:
-                    for i in range(3):
-                        try:
-                            self.switch_to.window(self.window_handles[0])
-                        except NoSuchWindowException:
-                            pass
-                        except WebDriverException:
-                            break
-                        except IndexError:
-                            break
-                    self.quit()
-                    exit(0)
-
-                except UnexpectedAlertPresentException:
-                    pass
-
-                except TypeError:
-                    pass
-
-                except InvalidCookieDomainException:
-                    pass
-
-                except InvalidSessionIdException:
-                    self.quit()
-                    exit(0)
-
-                except IndexError:
-                    self.quit()
-                    exit(0)
-
-                except WebDriverException:
-                    self.quit()
-                    exit(0)
-
-    return ResoBrowser
 
 
 if __name__ == '__main__':
-    Reso = get_reso_class()
-    with Reso() as r:
+    with ResoBrowser() as r:
         r.run()
-
-
-    # pyinstaller --onefile main.py --ico=reso-2-logo-png-transparent.ico --name=reso --windowed && venv-32\Scripts\pyinstaller.exe --onefile main.py --ico=reso-2-logo-png-transparent.ico --name=reso32 --windowed
