@@ -1,6 +1,6 @@
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Optional, Tuple, Dict
+from typing import Optional
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome
@@ -16,6 +16,7 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 
 from ResoBot import AccountManager
 from support import raise_error
+from selenium.webdriver.remote.webdriver import WebDriver
 
 
 class Browser:
@@ -31,15 +32,15 @@ class Browser:
             self.klass = self.browserDictionary[name][0]
         except KeyError:
             raise_error(f'Недоступный браузер {name}')
-        self.service = self.browserDictionary[name][1]
-        self.options = self.browserDictionary[name][2]
+        self.service = self.browserDictionary[name][1]()
+        self.options = self.browserDictionary[name][2]()
         if name == 'Firefox':
             self.options.set_preference("general.useragent.override", user_agent)
         else:
             self.options.add_argument(f"--user-agent='{user_agent}'")
 
 
-class BrowserMeta(type):
+class BrowserMeta(type(WebDriver)):
 
     @staticmethod
     def get_ini_options() -> Optional[SectionProxy]:
@@ -54,22 +55,18 @@ class BrowserMeta(type):
             raise_error("Проблемы с ини-файлом, не найдено поле options")
         else:
             for line in options:
-                if line != 'hash' or line != 'browser' or line != 'user-agent':
+                if not (line == 'hash' or line == 'browser' or line == 'user-agent'):
                     raise_error(f'Проблемы с ини-файлом, поле {line} не валидно')
             return options
 
-    def __new__(cls, name: str, bases: Tuple, attrs: Dict):
+    def __new__(cls, name, bases, attrs):
         options = cls.get_ini_options()
-        browser = Browser(name=options['browser'], user_agent=options['user-agent'])
-        attrs.update(
-            {
-                'service': browser.service,
-                'options': browser.options,
-                'ini_options': options,
-            }
-        )
-        bases = (browser.klass,)
-        return super().__new__(cls, name, bases, attrs)
+        browser = Browser(name=options['browser'].capitalize(), user_agent=options['user-agent'].capitalize())
+        new_browser_class = super().__new__(cls, name, (browser.klass,), attrs)
+        new_browser_class.hash = options['hash']
+        new_browser_class.service = browser.service
+        new_browser_class.options = browser.options
+        return new_browser_class
 
 
 class ResoBrowser(Firefox, metaclass=BrowserMeta):
@@ -78,14 +75,13 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     manager = AccountManager()
 
     # will fill in meta:
-    ini_options = {}
+    hash = None
     service = None
     options = None
 
     def __init__(self):
         super().__init__(service=self.service, options=self.options)
         self.need_to_set_telegram_cookies = False
-        self.hash = self.ini_options['hash']
         self.last_cookies = self.manager.get_telegram_cookies(self.hash)
         if not self.last_cookies:
             self.quit()

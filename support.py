@@ -1,8 +1,9 @@
-from selenium.common.exceptions import WebDriverException
-from telebot.apihelper import ApiTelegramException
 import time
 from random import randint
-import ctypes
+
+from selenium.common.exceptions import WebDriverException
+from telebot.apihelper import ApiTelegramException
+
 
 def retry(fn):
     def inner(*args, **kwargs):
@@ -32,6 +33,7 @@ def retry(fn):
 
     return inner
 
+
 def raise_error(error_txt):
-    ctypes.windll.user32.MessageBoxW(0, error_txt, "Error message", 0)
+    print(error_txt)
     exit(1)
