@@ -4,3 +4,4 @@
 /poetry.lock
 /.venv/
 /reso_auto/geckodriver.log
+/.mypy_cache/
