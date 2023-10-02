@@ -1,10 +1,8 @@
 import time
 from configparser import ConfigParser, SectionProxy
-from sys import exit
 from typing import Optional, Tuple, Dict
 
-from selenium.common.exceptions import NoSuchWindowException, WebDriverException, NoSuchElementException, \
-    UnexpectedAlertPresentException, InvalidSessionIdException, InvalidCookieDomainException
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome
 from selenium.webdriver import Edge
 from selenium.webdriver import Firefox
@@ -16,7 +14,8 @@ from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 
-from ResoBot import AccountManager, raise_error
+from ResoBot import AccountManager
+from support import raise_error
 
 
 class Browser:
@@ -79,7 +78,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     manager = AccountManager()
 
     # will fill in meta:
-    ini_options = Dict
+    ini_options = {}
     service = None
     options = None
 
@@ -87,7 +86,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         super().__init__(service=self.service, options=self.options)
         self.need_to_set_telegram_cookies = False
         self.hash = self.ini_options['hash']
-        self.last_cookies = self.manager[self.hash]
+        self.last_cookies = self.manager.get_telegram_cookies(self.hash)
         if not self.last_cookies:
             self.quit()
             raise_error('Невалидный хэш')
@@ -97,30 +96,23 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self.delete_cookie('ResoOffice60')
 
     def get_and_insert_cookies(self):
-        tele_cookies = self.manager[self.hash]
+        tele_cookies = self.manager.get_telegram_cookies(self.hash)
         if not tele_cookies:
             self.quit()
             raise_error('Невалидный хэш')
         self.delete_reso_cookies()
         for line in tele_cookies:
             self.add_cookie(line)
-
-    def find_element(self, *args, **kwargs):
-        try:
-            return super().find_element(*args, **kwargs)
-        except NoSuchElementException:
-            return None
+        self.last_cookies = tele_cookies
 
     def auth_complete(self):
-        if 'reso.ru' in self.current_url and self.url_main + 'login' not in self.current_url:
-            welcome = self.find_element(By.XPATH,
-                                        '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')  # welcome msg
-            qr = self.find_element(By.XPATH, '//*[@id="qrImage"]')  # qr
-            if not welcome and not qr:
-                return True
+        try:
+            self.find_element(By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')
+        except NoSuchElementException:
+            return True
         return False
 
-    def get_cookies(self):
+    def get_browser_cookies(self):
         cookies = {
             'ASP.NET_SessionId': self.get_cookie('ASP.NET_SessionId'),
             'ResoOffice60': self.get_cookie('ResoOffice60')
@@ -134,39 +126,35 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         return cookies
 
     def logged_in(self):
-        tele_cookies = self.manager[self.hash]
-        browser_cookies = self.get_cookies()
+        tele_cookies = self.manager.get_telegram_cookies(self.hash)
+        browser_cookies = self.get_browser_cookies()
 
-        if self.need_to_overwrite_cookies and None not in get:
-            self.manager[self.hash] = self.get_cookies()
-            self.need_to_overwrite_cookies = False
+        if self.need_to_set_telegram_cookies:
+            # somebody logged in
+            self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
+            self.need_to_set_telegram_cookies = False
 
-        if not tele_cookies:
-            self.quit()
-            raise_error('Невалидный хэш')
+        elif self.last_cookies != browser_cookies:
+            # i'm logged in, but cookies changed by server
+            self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
+            self.last_cookies = browser_cookies
 
-        elif self.last_cookies != get:
-            self.manager[self.hash] = get
-            self.last_cookies = get
-
-        elif get != tele_cookies:
-            self.delete_reso_cookies()
-            for line in tele_cookies:
-                self.add_cookie(line)
-            self.last_cookies = self.get_cookies()
+        elif browser_cookies != tele_cookies:
+            # somebody changed cookies, but my cookies is actual
+            self.get_and_insert_cookies()
 
     def logged_out(self):
-        tele_cookies = self.manager[self.hash]
+        tele_cookies = self.manager.get_telegram_cookies(self.hash)
         if not tele_cookies:
             self.quit()
             raise_error('Невалидный хэш')
-        elif self.last_cookies != tele_cookies:
+        if self.last_cookies != tele_cookies:
             self.get_and_insert_cookies()
-            self.last_cookies = tele_cookies
+            self.get(self.url_main)
+        else:
+            self.need_to_set_telegram_cookies = True
 
     def run(self) -> None:
-        self.get(self.url_main)
-        self.get_and_insert_cookies() # without refreshing
         self.get(self.url_main)
         while True:
             if self.auth_complete():
@@ -174,7 +162,6 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             else:
                 self.logged_out()
             time.sleep(1)
-
 
 
 if __name__ == '__main__':
