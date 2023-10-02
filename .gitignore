@@ -1,5 +1,6 @@
 .idea
 .git
 /build/
-/venv/
-/geckodriver.log
+/poetry.lock
+/.venv/
+/reso_auto/geckodriver.log

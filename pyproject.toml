@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "resu-auto-public"
+version = "0.1.0"
+description = "parallel session service for reso"
+authors = ["Victor <vzagulin@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+selenium = "4.8.0"
+requests = "2.28.2"
+pytelegrambotapi = "4.10"
+mypy = "^1.5.1"
+wemake-python-styleguide = "^0.18.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
