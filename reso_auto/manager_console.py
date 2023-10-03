@@ -1,40 +1,40 @@
-from ResoBot import AccountManager
+"""Console for manage pinned message."""
+
 import json
-from random import randint
-import hashlib
+from random import getrandbits
 from typing import List
 
+from manager import AccountManager
+
 manager = AccountManager()
+BITS = 128
 
 
-def available_msg(accounts: List) -> None:
+def available_accounts_print(accounts: List) -> None:
+    """Available message print function.
+
+    Args:
+        accounts: list with accounts (hashes).
+    """
     print('Сейчас на сервере доступны следующие аккаунты:\n')
     for num, hsh in enumerate(accounts, start=1):
         print(f'{num}) {hsh}')
 
 
-def new_hash_print(hsh: str) -> None:
-    print(f'Новый хэш: {hsh}', end='\n\n')
-
-
-def generate_hash(name: str = ''):
-    code_phrase = ''.join([chr(randint(1, 125)) for i in range(20)])
-    return hashlib.md5(code_phrase.encode('utf-8')).hexdigest() + '_' + name
-
-
-def main():
+def main() -> None:
+    """Main console function."""
     command = ''
-    menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к образцу\n4 - Выход'
+    menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Выход'
     accounts = list(json.loads(manager.bot.get_chat(chat_id=manager.chat).pinned_message.text).keys())
     while command != '4':
-        available_msg(accounts)
+        available_accounts_print(accounts)
         print(menu)
         command = input('Ввод: ')
         if command == '1':
             name = input('Имя, которое будет добавлено к хэшу (можно оставить пустым): ')
-            hsh = generate_hash(name)
+            hsh = str(getrandbits(BITS)) + name
             manager.add_account(hsh)
-            new_hash_print(hsh)
+            print(f'Новый хэш: {hsh}', end='\n\n')
             accounts.append(hsh)
 
         elif command == '2':
@@ -50,7 +50,7 @@ def main():
         elif command == '3':
             manager.reinit()
             accounts = list(json.loads(manager.bot.get_chat(chat_id=manager.chat).pinned_message.text).keys())
-            print("Сообщение сброшено к изначальным настройкам.")
+            print('Сообщение сброшено к изначальным настройкам.')
 
 
 if __name__ == '__main__':

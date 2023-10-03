@@ -1,8 +1,13 @@
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Optional
+from typing import Dict, Optional, Tuple, Type, TypeAlias
 
-from selenium.common.exceptions import NoSuchElementException
+from handlers import raise_error
+from manager import AccountManager
+from selenium.common.exceptions import (
+    InvalidCookieDomainException, InvalidSessionIdException, NoSuchElementException, NoSuchWindowException,
+    UnexpectedAlertPresentException, WebDriverException,
+)
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -12,9 +17,8 @@ from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.common.exceptions import UnexpectedAlertPresentException, NoSuchWindowException, InvalidCookieDomainException, InvalidSessionIdException, WebDriverException
-from ResoBot import AccountManager
-from support import raise_error
+
+BaseDriverMeta: Type = type(WebDriver)
 
 
 class Browser:
@@ -38,8 +42,8 @@ class Browser:
             self.options.add_argument(f"--user-agent='{user_agent}'")
 
 
-class BrowserMeta(type(WebDriver)):
-
+class BrowserMeta(BaseDriverMeta):
+    """Metaclass for detect browser in ini options and change ResoBrowser class inheritance."""
     @staticmethod
     def get_ini_options() -> Optional[SectionProxy]:
         ini_options = ConfigParser()
@@ -56,8 +60,9 @@ class BrowserMeta(type(WebDriver)):
                 if not (line == 'hash' or line == 'browser' or line == 'user-agent'):
                     raise_error(f'Проблемы с ини-файлом, поле {line} не валидно')
             return options
+        return None
 
-    def __new__(cls, name, bases, attrs):
+    def __new__(cls, name: str, bases: Tuple, attrs: Dict) -> TypeAlias:
         options = cls.get_ini_options()
         browser = Browser(name=options['browser'].capitalize(), user_agent=options['user-agent'].capitalize())
         new_browser_class = super().__new__(cls, name, (browser.klass,), attrs)
@@ -77,7 +82,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     service = None
     options = None
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(service=self.service, options=self.options)
         self.need_to_set_telegram_cookies = False
         self.last_cookies = self.manager.get_telegram_cookies(self.hash)
@@ -99,14 +104,14 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.add_cookie(line)
         self.last_cookies = tele_cookies
 
-    def auth_complete(self):
+    def auth_complete(self) -> bool:
         try:
             self.find_element(By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')
         except NoSuchElementException:
             return True
         return False
 
-    def get_browser_cookies(self):
+    def get_browser_cookies(self) -> Dict:
         cookies = {
             'ASP.NET_SessionId': self.get_cookie('ASP.NET_SessionId'),
             'ResoOffice60': self.get_cookie('ResoOffice60')
