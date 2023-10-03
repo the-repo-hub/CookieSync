@@ -95,7 +95,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.quit()
             raise_error('Невалидный хэш')
         self.delete_reso_cookies()
-        for line in tele_cookies:
+        for line in tele_cookies.values():
             self.add_cookie(line)
         self.last_cookies = tele_cookies
 
@@ -149,6 +149,8 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.need_to_set_telegram_cookies = True
 
     def run(self) -> None:
+        self.get(self.url_main)
+        self.get_and_insert_cookies()
         self.get(self.url_main)
         while True:
             if self.auth_complete():
