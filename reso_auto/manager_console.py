@@ -5,6 +5,7 @@ import unittest
 from random import getrandbits
 from reso_auto.manager import MessageManager
 from reso_auto.tests.tests import ResoTestCase
+from telebot.apihelper import ApiTelegramException
 
 
 class Console:
@@ -12,9 +13,25 @@ class Console:
 
     manager = MessageManager()
     BITS = 128
-    if not manager.bot.get_chat(chat_id=manager.chat).pinned_message:
-        manager.reinit()
-    accounts = list(json.loads(manager.bot.get_chat(chat_id=manager.chat).pinned_message.text).keys())
+    accounts = None
+
+    @classmethod
+    def initial_error_handler(cls, error_code: int) -> None:
+        if error_code == 400:
+            exit('Чат {chat} не найден необходимо написать боту /start'.format(chat=cls.manager.chat))
+        elif error_code == 401:
+            exit('Токен {token} не валиден, бот не существует.'.format(token=cls.manager.bot.token))
+        elif error_code == 0:
+            print(
+                'Бот существует, но отсутствует закрепленное сообщение. Создать новое сообщение с исходнымы куками?',
+                end='\n',
+            )
+            command = input('1 - Да\n2 - Выход\n')
+            if command == '1':
+                cls.manager.reinit()
+                cls.accounts = list(json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys())
+            else:
+                exit()
 
     @classmethod
     def _available_accounts_print(cls) -> None:
@@ -26,6 +43,12 @@ class Console:
     @classmethod
     def main(cls) -> None:
         """Main console function."""
+        try:
+            cls.accounts = list(json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys())
+        except ApiTelegramException as error:
+            cls.initial_error_handler(error.error_code)
+        except AttributeError:
+            cls.initial_error_handler(0)
         command = ''
         menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Запуск тесткейсов\n5 - Выход'
 
