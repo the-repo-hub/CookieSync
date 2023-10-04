@@ -8,6 +8,8 @@ from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.options import ArgOptions
+from selenium.webdriver.common.service import Service
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
@@ -24,6 +26,8 @@ INI_FILE_PATH = os.path.join(BASE_DIR, 'reso.ini')
 
 
 class BrowserDetector:
+    """Detect browser class and his services and options."""
+
     browserDictionary = {
         'Firefox': (Firefox, FirefoxService, FirefoxOptions),
         'Chrome': (Chrome, ChromeService, ChromeOptions),
@@ -82,9 +86,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     manager = MessageManager()
 
     # will fill in meta:
-    hash = None
-    service = None
-    options = None
+    hash: str
+    service: Service
+    options: ArgOptions
 
     def __init__(self) -> None:
         super().__init__(service=self.service, options=self.options)

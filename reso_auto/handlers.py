@@ -1,11 +1,12 @@
 import time
 from random import randint
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from selenium.common.exceptions import (
     InvalidCookieDomainException, InvalidSessionIdException, NoSuchWindowException, UnexpectedAlertPresentException,
     WebDriverException,
 )
+from selenium.webdriver.remote.webdriver import WebDriver
 from telebot.apihelper import ApiTelegramException
 from urllib3.exceptions import MaxRetryError
 
@@ -13,7 +14,7 @@ from urllib3.exceptions import MaxRetryError
 def retry(fn: Callable) -> Callable:
     """Retry decorator for handle errors."""
 
-    def inner(*args: List, **kwargs: Dict) -> Optional[Callable]:
+    def inner(*args: Tuple, **kwargs: Dict) -> Optional[Callable]:
         """Inner decorator function."""
         err_counter = 0
         err_type = ''
@@ -43,8 +44,8 @@ def retry(fn: Callable) -> Callable:
     return inner
 
 
-def exception_run_handler(fn: Callable):
-    def inner(obj, *args, **kwargs):
+def exception_run_handler(fn: Callable) -> Callable:
+    def inner(obj: WebDriver, *args: Tuple, **kwargs: Dict) -> Any:
         try:
             return fn(obj, *args, **kwargs)
         except NoSuchWindowException:

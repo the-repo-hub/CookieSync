@@ -2,6 +2,7 @@
 
 import json
 from random import getrandbits
+from typing import List
 
 from telebot.apihelper import ApiTelegramException
 
@@ -13,7 +14,7 @@ class Console:
 
     manager = MessageManager()
     BITS = 128
-    accounts = None
+    accounts: List
 
     @classmethod
     def initial_error_handler(cls, error_code: int) -> None:
