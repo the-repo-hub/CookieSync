@@ -40,7 +40,7 @@ class MessageManager(object):
     def __init__(self) -> None:
         """Account manager initial method."""
         # FIXME token
-        self.bot = TeleBot('6357610934:AAEiPJFxEbEEVfVaBM9xyMWP670363MZg20')
+        self.bot = TeleBot('')
         self.chat = 408972919
 
     @retry
@@ -88,7 +88,6 @@ class MessageManager(object):
         as_json[hsh] = cookies
         self.bot.edit_message_text(chat_id=self.chat, message_id=pinned.message_id, text=json.dumps(as_json))
 
-    @retry
     def add_account(self, hsh: str) -> None:
         """Add new account to pinned message.
 
@@ -100,7 +99,6 @@ class MessageManager(object):
         as_json[hsh] = self.message_sample['test']
         self.bot.edit_message_text(chat_id=self.chat, message_id=pinned.message_id, text=json.dumps(as_json))
 
-    @retry
     def remove_account(self, hsh: str) -> None:
         """Remove account from pinned message.
 
