@@ -6,3 +6,6 @@ lint:
 
 mypy:
 	poetry run mypy reso_auto
+
+test:
+	python -m unittest

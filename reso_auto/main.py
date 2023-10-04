@@ -1,13 +1,9 @@
+import os
 import time
 from configparser import ConfigParser, SectionProxy
 from typing import Dict, Optional, Tuple, Type, TypeAlias
 
-from reso_auto.handlers import raise_error
-from reso_auto.manager import MessageManager
-from selenium.common.exceptions import (
-    InvalidCookieDomainException, InvalidSessionIdException, NoSuchElementException, NoSuchWindowException,
-    UnexpectedAlertPresentException, WebDriverException,
-)
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -17,9 +13,14 @@ from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
-from reso_auto.choiches import CookieFields, ErrorMessages
 
+from reso_auto.choiches import CookieFields, ErrorMessages
+from reso_auto.handlers import exception_run_handler, raise_error
+from reso_auto.manager import MessageManager
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BaseDriverMeta: Type = type(WebDriver)
+INI_FILE_PATH = os.path.join(BASE_DIR, 'reso.ini')
 
 
 class BrowserDetector:
@@ -48,7 +49,7 @@ class BrowserMeta(BaseDriverMeta):
     @staticmethod
     def get_ini_options() -> Optional[SectionProxy]:
         ini_options = ConfigParser()
-        result = ini_options.read('reso.ini', encoding='UTF-8')
+        result = ini_options.read(INI_FILE_PATH, encoding='UTF-8')
         # нет файла
         if not result:
             raise_error(ErrorMessages.no_ini.value)
@@ -109,6 +110,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def auth_complete(self) -> bool:
         try:
+            # welcome message
             self.find_element(By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]')
         except NoSuchElementException:
             return True
@@ -156,7 +158,10 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         else:
             self.need_to_set_telegram_cookies = True
 
+    @exception_run_handler
     def run(self) -> None:
+
+        # if it will be removed, don't forget about implicitly wait
         self.get(self.url_main)
         self.get_and_insert_cookies()
         self.get(self.url_main)
@@ -170,32 +175,4 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
 if __name__ == '__main__':
     r = ResoBrowser()
-    try:
-        r.run()
-    except NoSuchWindowException:
-        try:
-            r.switch_to.window(r.window_handles[0])
-        except InvalidSessionIdException:
-            r.quit()
-            exit(0)
-
-    except UnexpectedAlertPresentException:
-        pass
-
-    except TypeError:
-        pass
-
-    except InvalidCookieDomainException:
-        pass
-
-    except InvalidSessionIdException:
-        r.quit()
-        exit(0)
-
-    except IndexError:
-        r.quit()
-        exit(0)
-
-    except WebDriverException:
-        r.quit()
-        exit(0)
+    r.run()

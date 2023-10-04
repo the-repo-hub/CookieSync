@@ -1,11 +1,11 @@
 """Console for manage pinned message."""
 
 import json
-import unittest
 from random import getrandbits
-from reso_auto.manager import MessageManager
-from reso_auto.tests.tests import ResoTestCase
+
 from telebot.apihelper import ApiTelegramException
+
+from reso_auto.manager import MessageManager
 
 
 class Console:
@@ -50,9 +50,9 @@ class Console:
         except AttributeError:
             cls.initial_error_handler(0)
         command = ''
-        menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Запуск тесткейсов\n5 - Выход'
+        menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Выход'
 
-        while command != '5':
+        while command != '4':
             cls._available_accounts_print()
             print(menu)
             command = input('Ввод: ')
@@ -79,10 +79,6 @@ class Console:
                     json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys(),
                 )
                 print('Сообщение сброшено к изначальным настройкам.')
-            elif command == '4':
-                suite = unittest.TestLoader().loadTestsFromTestCase(testCaseClass=ResoTestCase)
-                unittest.TextTestRunner().run(suite)
-                continue
 
 
 if __name__ == '__main__':

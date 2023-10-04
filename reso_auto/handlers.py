@@ -2,8 +2,12 @@ import time
 from random import randint
 from typing import Callable, Dict, List, Optional
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import (
+    InvalidCookieDomainException, InvalidSessionIdException, NoSuchWindowException, UnexpectedAlertPresentException,
+    WebDriverException,
+)
 from telebot.apihelper import ApiTelegramException
+from urllib3.exceptions import MaxRetryError
 
 
 def retry(fn: Callable) -> Callable:
@@ -35,6 +39,45 @@ def retry(fn: Callable) -> Callable:
             time.sleep(randint(1, 7))
         raise_error(f"Проблемы с интернетом.\nТип ошибки: {err_type}\nФункция: {fn.__name__}")
         return None
+
+    return inner
+
+
+def exception_run_handler(fn: Callable):
+    def inner(obj, *args, **kwargs):
+        try:
+            return fn(obj, *args, **kwargs)
+        except NoSuchWindowException:
+            # raises if first tab was closed
+            try:
+                obj.switch_to.window(obj.window_handles[0])
+            except InvalidSessionIdException:
+                obj.quit()
+                exit(0)
+
+        except UnexpectedAlertPresentException:
+            # raises if browser had js alert
+            pass
+
+        except TypeError:
+            pass
+
+        except InvalidCookieDomainException:
+            pass
+
+        except InvalidSessionIdException:
+            exit(0)
+
+        except IndexError:
+            obj.quit()
+            exit(0)
+
+        except WebDriverException:
+            obj.quit()
+            exit(0)
+
+        except MaxRetryError:
+            exit(0)
 
     return inner
 
