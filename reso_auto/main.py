@@ -2,8 +2,8 @@ import time
 from configparser import ConfigParser, SectionProxy
 from typing import Dict, Optional, Tuple, Type, TypeAlias
 
-from handlers import raise_error
-from manager import MessageManager
+from reso_auto.handlers import raise_error
+from reso_auto.manager import MessageManager
 from selenium.common.exceptions import (
     InvalidCookieDomainException, InvalidSessionIdException, NoSuchElementException, NoSuchWindowException,
     UnexpectedAlertPresentException, WebDriverException,
@@ -17,15 +17,16 @@ from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
+from reso_auto.choiches import CookieFields, ErrorMessages
 
 BaseDriverMeta: Type = type(WebDriver)
 
 
-class Browser:
+class BrowserDetector:
     browserDictionary = {
-        'Firefox': [Firefox, FirefoxService, FirefoxOptions],
-        'Chrome': [Chrome, ChromeService, ChromeOptions],
-        'Edge': [Edge, EdgeService, EdgeOptions]
+        'Firefox': (Firefox, FirefoxService, FirefoxOptions),
+        'Chrome': (Chrome, ChromeService, ChromeOptions),
+        'Edge': (Edge, EdgeService, EdgeOptions)
     }
 
     def __init__(self, name: str, user_agent: str):
@@ -33,7 +34,7 @@ class Browser:
         try:
             self.klass = self.browserDictionary[name][0]
         except KeyError:
-            raise_error(f'Недоступный браузер {name}')
+            raise_error(ErrorMessages.invalid_browser.value.format(browser=self.name))
         self.service = self.browserDictionary[name][1]()
         self.options = self.browserDictionary[name][2]()
         if name == 'Firefox':
@@ -50,23 +51,25 @@ class BrowserMeta(BaseDriverMeta):
         result = ini_options.read('reso.ini', encoding='UTF-8')
         # нет файла
         if not result:
-            raise_error("Не найден файл reso.ini")
+            raise_error(ErrorMessages.no_ini.value)
         try:
             options = ini_options['options']
         except KeyError:
-            raise_error("Проблемы с ини-файлом, не найдено поле options")
+            raise_error(ErrorMessages.no_ini_options.value)
         else:
-            for line in options:
-                if not (line == 'hash' or line == 'browser' or line == 'user-agent'):
-                    raise_error(f'Проблемы с ини-файлом, поле {line} не валидно')
+            for field, value in options.items():
+                if not (field == 'hash' or field == 'browser' or field == 'user-agent'):
+                    raise_error(ErrorMessages.invalid_ini_field.value.format(field=field))
+                if not options.get(field):
+                    raise_error(ErrorMessages.invalid_ini_value.value.format(value=value, field=field))
             return options
         return None
 
     def __new__(cls, name: str, bases: Tuple, attrs: Dict) -> TypeAlias:
         options = cls.get_ini_options()
-        browser = Browser(name=options['browser'].capitalize(), user_agent=options['user-agent'].capitalize())
+        browser = BrowserDetector(name=options['browser'].capitalize(), user_agent=options['user-agent'].capitalize()) # type: ignore
         new_browser_class = super().__new__(cls, name, (browser.klass,), attrs)
-        new_browser_class.hash = options['hash']
+        new_browser_class.hash = options.get('hash', 'None')
         new_browser_class.service = browser.service
         new_browser_class.options = browser.options
         return new_browser_class
@@ -88,17 +91,17 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self.last_cookies = self.manager.get_telegram_cookies(self.hash)
         if not self.last_cookies:
             self.quit()
-            raise_error('Невалидный хэш')
+            raise_error(ErrorMessages.invalid_hash.value)
 
     def delete_reso_cookies(self) -> None:
-        self.delete_cookie('ASP.NET_SessionId')
-        self.delete_cookie('ResoOffice60')
+        self.delete_cookie(CookieFields.ASPNET)
+        self.delete_cookie(CookieFields.ResoOffice60)
 
     def get_and_insert_cookies(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
         if not tele_cookies:
             self.quit()
-            raise_error('Невалидный хэш')
+            raise_error(ErrorMessages.invalid_hash.value)
         self.delete_reso_cookies()
         for line in tele_cookies.values():
             self.add_cookie(line)
@@ -113,15 +116,15 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def get_browser_cookies(self) -> Dict:
         cookies = {
-            'ASP.NET_SessionId': self.get_cookie('ASP.NET_SessionId'),
-            'ResoOffice60': self.get_cookie('ResoOffice60')
+            CookieFields.ASPNET: self.get_cookie(CookieFields.ASPNET),
+            CookieFields.ResoOffice60: self.get_cookie(CookieFields.ResoOffice60)
         }
-        if cookies.get('ResoOffice60'):
-            cookies['ResoOffice60'].pop('domain')
-            cookies['ResoOffice60']['sameSite'] = 'None'
-        if cookies.get('ASP.NET_SessionId'):
-            cookies['ASP.NET_SessionId'].pop('domain')
-            cookies['ASP.NET_SessionId']['sameSite'] = 'None'
+        if cookies.get(CookieFields.ResoOffice60):
+            cookies[CookieFields.ResoOffice60].pop('domain')
+            cookies[CookieFields.ResoOffice60]['sameSite'] = 'None'
+        if cookies.get(CookieFields.ASPNET):
+            cookies[CookieFields.ASPNET].pop('domain')
+            cookies[CookieFields.ASPNET]['sameSite'] = 'None'
         return cookies
 
     def logged_in(self) -> None:
@@ -146,7 +149,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
         if not tele_cookies:
             self.quit()
-            raise_error('Невалидный хэш')
+            raise_error(ErrorMessages.invalid_hash.value)
         if self.last_cookies != tele_cookies:
             self.get_and_insert_cookies()
             self.get(self.url_main)

@@ -1,9 +1,10 @@
 """Console for manage pinned message."""
 
 import json
+import unittest
 from random import getrandbits
-
-from manager import MessageManager
+from reso_auto.manager import MessageManager
+from reso_auto.tests.tests import ResoTestCase
 
 
 class Console:
@@ -26,15 +27,15 @@ class Console:
     def main(cls) -> None:
         """Main console function."""
         command = ''
-        menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Выход'
+        menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Запуск тесткейсов\n5 - Выход'
 
-        while command != '4':
+        while command != '5':
             cls._available_accounts_print()
             print(menu)
             command = input('Ввод: ')
             if command == '1':
                 name = input('Имя, которое будет добавлено к хэшу (можно оставить пустым): ')
-                hsh = str(getrandbits(cls.BITS)) + name
+                hsh = '{hash}_{name}'.format(hash=str(getrandbits(cls.BITS)), name=name)
                 cls.manager.add_account(hsh)
                 print(f'Новый хэш: {hsh}', end='\n\n')
                 cls.accounts.append(hsh)
@@ -45,16 +46,20 @@ class Console:
                 if hsh in cls.accounts:
                     cls.manager.remove_account(hsh)
                     cls.accounts.pop(num)
-                    print(f'Хэш {command} удалён.')
+                    print('Хэш {hsh} удалён.'.format(hsh=hsh))
                 else:
                     print('Хэша нет в списке!')
 
             elif command == '3':
                 cls.manager.reinit()
                 cls.accounts = list(
-                    json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys()
+                    json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys(),
                 )
                 print('Сообщение сброшено к изначальным настройкам.')
+            elif command == '4':
+                suite = unittest.TestLoader().loadTestsFromTestCase(testCaseClass=ResoTestCase)
+                unittest.TextTestRunner().run(suite)
+                continue
 
 
 if __name__ == '__main__':

@@ -5,3 +5,5 @@
 /.venv/
 /reso_auto/geckodriver.log
 /.mypy_cache/
+/reso_auto/tests/.pytest_cache/
+/reso_auto/tests/geckodriver.log
