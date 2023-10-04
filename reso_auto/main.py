@@ -3,7 +3,7 @@ from configparser import ConfigParser, SectionProxy
 from typing import Dict, Optional, Tuple, Type, TypeAlias
 
 from handlers import raise_error
-from manager import AccountManager
+from manager import MessageManager
 from selenium.common.exceptions import (
     InvalidCookieDomainException, InvalidSessionIdException, NoSuchElementException, NoSuchWindowException,
     UnexpectedAlertPresentException, WebDriverException,
@@ -75,7 +75,7 @@ class BrowserMeta(BaseDriverMeta):
 class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     url_main = 'https://office.reso.ru/'
-    manager = AccountManager()
+    manager = MessageManager()
 
     # will fill in meta:
     hash = None
@@ -170,7 +170,11 @@ if __name__ == '__main__':
     try:
         r.run()
     except NoSuchWindowException:
-        r.switch_to.window(r.window_handles[0])
+        try:
+            r.switch_to.window(r.window_handles[0])
+        except InvalidSessionIdException:
+            r.quit()
+            exit(0)
 
     except UnexpectedAlertPresentException:
         pass

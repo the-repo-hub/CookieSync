@@ -7,7 +7,7 @@ from handlers import retry
 from telebot import TeleBot
 
 
-class AccountManager(object):
+class MessageManager(object):
     """Account manager class for manage pinned message data."""
 
     message_sample = {
