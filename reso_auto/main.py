@@ -1,13 +1,12 @@
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Dict, List, Tuple, Type, Union, Any
+from typing import Any, Dict, List, Tuple, Type
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.service import Service
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions

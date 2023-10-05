@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from telebot import TeleBot
 
 from reso_auto.handlers import retry
-from reso_auto.settings import MESSAGE_SAMPLE_PATH
+from reso_auto.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
 
 
 def get_message_sample() -> Dict:
@@ -26,8 +26,8 @@ class MessageManager(object):
 
     def __init__(self) -> None:
         """Account manager initial method."""
-        self.bot = TeleBot('')
-        self.chat = 408972919
+        self.bot = TeleBot(BOT_TOKEN)
+        self.chat = CHAT_ID
 
     @retry
     def reinit(self) -> None:
