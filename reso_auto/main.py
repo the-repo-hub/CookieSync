@@ -1,14 +1,12 @@
-import os
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Dict, List, Tuple, Type, TypeAlias
+from typing import Dict, List, Tuple, Type, Union, Any
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.options import ArgOptions
 from selenium.webdriver.common.service import Service
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
@@ -19,10 +17,9 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from reso_auto.choiches import CookieFields, ErrorMessages
 from reso_auto.handlers import exception_run_handler, raise_error
 from reso_auto.manager import MessageManager
+from reso_auto.settings import INI_FILE_PATH
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BaseDriverMeta: Type = type(WebDriver)
-INI_FILE_PATH = os.path.join(BASE_DIR, 'reso.ini')
 
 
 class BrowserDetector:
@@ -50,6 +47,7 @@ class BrowserDetector:
 
 class BrowserMeta(BaseDriverMeta):
     """Metaclass for detect browser in ini options and change ResoBrowser class inheritance."""
+
     @staticmethod
     def get_ini_options() -> SectionProxy:
         ini_options = ConfigParser()
@@ -68,9 +66,10 @@ class BrowserMeta(BaseDriverMeta):
                 raise_error(ErrorMessages.invalid_ini_value.value.format(value=value, field=field))
         return options
 
-    def __new__(cls, name: str, bases: Tuple, attrs: Dict) -> TypeAlias:
+    def __new__(cls, name: str, bases: Tuple, attrs: Dict) -> Any:
         options = cls.get_ini_options()
-        browser = BrowserDetector(name=options['browser'].capitalize(), user_agent=options['user-agent'].capitalize()) # type: ignore
+        browser = BrowserDetector(name=options['browser'].capitalize(),
+                                  user_agent=options['user-agent'].capitalize())  # type: ignore
         new_browser_class = super().__new__(cls, name, (browser.klass,), attrs)
         new_browser_class.hash = options.get('hash', 'None')
         new_browser_class.service = browser.service
@@ -79,14 +78,13 @@ class BrowserMeta(BaseDriverMeta):
 
 
 class ResoBrowser(Firefox, metaclass=BrowserMeta):
-
     url_main = 'https://office.reso.ru/'
     manager = MessageManager()
 
     # will fill in meta:
     hash: str
-    service: Service
-    options: ArgOptions
+    service: FirefoxService
+    options: FirefoxOptions
 
     def __init__(self) -> None:
         super().__init__(service=self.service, options=self.options)
@@ -97,8 +95,8 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             raise_error(ErrorMessages.invalid_hash.value)
 
     def delete_reso_cookies(self) -> None:
-        self.delete_cookie(CookieFields.aspnet)
-        self.delete_cookie(CookieFields.reso_office60)
+        self.delete_cookie(CookieFields.aspnet.value)
+        self.delete_cookie(CookieFields.reso_office60.value)
 
     def get_and_insert_cookies(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
@@ -106,9 +104,6 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.quit()
             raise_error(ErrorMessages.invalid_hash.value)
         self.delete_reso_cookies()
-        # prevent .office.reso domain, bug in selenium
-        tele_cookies[0].pop('domain')
-        tele_cookies[1].pop('domain')
         for line in tele_cookies:
             self.add_cookie(line)
         self.last_cookies = tele_cookies
@@ -122,10 +117,15 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         return False
 
     def get_browser_cookies(self) -> List:
-        cookies = [self.get_cookie(CookieFields.aspnet.value), self.get_cookie(CookieFields.reso_office60.value)]
-        if None in cookies:
-            return raise_error(ErrorMessages.invalid_cookies.value)
-        return cookies
+        cookies = [
+            self.get_cookie(CookieFields.aspnet.value),
+            self.get_cookie(CookieFields.reso_office60.value),
+        ]
+        if all(cookies):
+            cookies[0].pop('domain')  # type: ignore
+            cookies[1].pop('domain')  # type: ignore
+            return cookies
+        return raise_error(ErrorMessages.invalid_cookies.value)
 
     def logged_in(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from telebot import TeleBot
 
 from reso_auto.handlers import retry
+from reso_auto.settings import MESSAGE_SAMPLE_PATH
 
 
 def get_message_sample() -> Dict:
@@ -14,7 +15,7 @@ def get_message_sample() -> Dict:
     Returns:
         JSON message sample.
     """
-    with open('message_sample.json') as dct:
+    with open(MESSAGE_SAMPLE_PATH) as dct:
         return json.loads(dct.read())
 
 
@@ -25,8 +26,7 @@ class MessageManager(object):
 
     def __init__(self) -> None:
         """Account manager initial method."""
-        # FIXME token
-        self.bot = TeleBot('6486270881:AAFMgY_fX8_hlb9pr-9XSiLCv7TPLRS6IT0')
+        self.bot = TeleBot('')
         self.chat = 408972919
 
     @retry

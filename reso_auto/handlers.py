@@ -60,9 +60,6 @@ def exception_run_handler(fn: Callable) -> Callable:
             # raises if browser had js alert
             pass
 
-        except TypeError:
-            pass
-
         except InvalidCookieDomainException:
             pass
 
