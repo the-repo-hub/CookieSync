@@ -1,7 +1,7 @@
 import os
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Dict, Optional, Tuple, Type, TypeAlias
+from typing import Dict, Optional, Tuple, Type, TypeAlias, List
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome, Edge, Firefox
@@ -42,7 +42,7 @@ class BrowserDetector:
             raise_error(ErrorMessages.invalid_browser.value.format(browser=self.name))
         self.service = self.browserDictionary[name][1]()
         self.options = self.browserDictionary[name][2]()
-        if name == 'Firefox':
+        if isinstance(self.options, FirefoxOptions):
             self.options.set_preference("general.useragent.override", user_agent)
         else:
             self.options.add_argument(f"--user-agent='{user_agent}'")
@@ -51,7 +51,7 @@ class BrowserDetector:
 class BrowserMeta(BaseDriverMeta):
     """Metaclass for detect browser in ini options and change ResoBrowser class inheritance."""
     @staticmethod
-    def get_ini_options() -> Optional[SectionProxy]:
+    def get_ini_options() -> SectionProxy:
         ini_options = ConfigParser()
         result = ini_options.read(INI_FILE_PATH, encoding='UTF-8')
         # нет файла
@@ -60,15 +60,13 @@ class BrowserMeta(BaseDriverMeta):
         try:
             options = ini_options['options']
         except KeyError:
-            raise_error(ErrorMessages.no_ini_options.value)
-        else:
-            for field, value in options.items():
-                if not (field == 'hash' or field == 'browser' or field == 'user-agent'):
-                    raise_error(ErrorMessages.invalid_ini_field.value.format(field=field))
-                if not options.get(field):
-                    raise_error(ErrorMessages.invalid_ini_value.value.format(value=value, field=field))
-            return options
-        return None
+            return raise_error(ErrorMessages.no_ini_options.value)
+        for field, value in options.items():
+            if not (field == 'hash' or field == 'browser' or field == 'user-agent'):
+                raise_error(ErrorMessages.invalid_ini_field.value.format(field=field))
+            if not options.get(field):
+                raise_error(ErrorMessages.invalid_ini_value.value.format(value=value, field=field))
+        return options
 
     def __new__(cls, name: str, bases: Tuple, attrs: Dict) -> TypeAlias:
         options = cls.get_ini_options()
@@ -108,7 +106,10 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.quit()
             raise_error(ErrorMessages.invalid_hash.value)
         self.delete_reso_cookies()
-        for line in tele_cookies.values():
+        # prevent .office.reso domain, bug in selenium
+        tele_cookies[0].pop('domain')
+        tele_cookies[1].pop('domain')
+        for line in tele_cookies:
             self.add_cookie(line)
         self.last_cookies = tele_cookies
 
@@ -120,17 +121,11 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             return True
         return False
 
-    def get_browser_cookies(self) -> Dict:
-        cookies = {
-            CookieFields.ASPNET: self.get_cookie(CookieFields.ASPNET),
-            CookieFields.ResoOffice60: self.get_cookie(CookieFields.ResoOffice60)
-        }
-        if cookies.get(CookieFields.ResoOffice60):
-            cookies[CookieFields.ResoOffice60].pop('domain')
-            cookies[CookieFields.ResoOffice60]['sameSite'] = 'None'
-        if cookies.get(CookieFields.ASPNET):
-            cookies[CookieFields.ASPNET].pop('domain')
-            cookies[CookieFields.ASPNET]['sameSite'] = 'None'
+    def get_browser_cookies(self) -> List:
+        cookies = [self.get_cookie(CookieFields.ASPNET.value), self.get_cookie(CookieFields.ResoOffice60.value)]
+        for i in range(len(cookies)):
+            cookies[i].pop('domain')
+            cookies[i]['sameSite'] = 'None'
         return cookies
 
     def logged_in(self) -> None:

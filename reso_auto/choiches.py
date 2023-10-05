@@ -17,4 +17,3 @@ class ErrorMessages(str, Enum):
     no_ini_options = 'Проблемы с ини-файлом, не найдено поле options'
     invalid_ini_field = 'Проблемы с ини-файлом: поле {field} не валидно'
     invalid_ini_value = 'Проблемы с ини-файлом: значение {value} в поле {field} не валидно'
-

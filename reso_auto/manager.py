@@ -1,11 +1,10 @@
 """Pinned message manager module."""
 
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from telebot import TeleBot
 
-from reso_auto.choiches import CookieFields
 from reso_auto.handlers import retry
 
 
@@ -14,34 +13,32 @@ class MessageManager(object):
 
     message_sample = {
         'test':
-            {
-                CookieFields.ASPNET:
-                    {
-                        'name': 'ASP.NET_SessionId',
-                        'value': 'lbzhaffyeiwv312lkcll2oqh',
-                        'path': '/',
-                        'secure': False,
-                        'httpOnly': True,
-                        'sameSite': 'None',
-                        'domain': 'office.reso.ru',
-                    },
-                CookieFields.ResoOffice60:
-                    {
-                        'name': 'ResoOffice60',
-                        'value': '3D348D62E7F8F979671E3F6696A9AA10BCBB8B8C3B6FA2FF5D936B9BDCA8387323211D393DB87804C5DCCCCCA8549C0B78612EDFFF534224CA62FC0CA1413EA705D0DE177DC858A6B97DBE5FBC3D9BB51A56A0D19CCE4B5A4960811944D19DF274D5B6B3EEE03038B7C83B00E99194F1',
-                        'path': '/',
-                        'secure': False,
-                        'httpOnly': True,
-                        'sameSite': 'None',
-                        'domain': 'office.reso.ru',
-                    },
-            },
+            [
+                {
+                    'name': 'ASP.NET_SessionId',
+                    'value': 'yipellveieo2a3zqeqzp0i4x',
+                    'path': '/',
+                    'secure': False,
+                    'httpOnly': True,
+                    'sameSite': 'None',
+                    'domain': 'office.reso.ru',
+                },
+                {
+                    'name': 'ResoOffice60',
+                    'value': 'D8F3B2901DF22BB1B2BBFE1C60038B9428298E0B4F2F89677388C3A0CAC19ECF0C4234101414E289B0247EB1B39430F0C6A5DBD483BFF0A7DF198B42AEB3039BABAFB8403F1011D02CA712DE98C9D9BA3FF65A41071F98078D7CFA4E98210400704D891FC4969BB3CCB5BD4A3FA46AAC',
+                    'path': '/',
+                    'secure': False,
+                    'httpOnly': True,
+                    'sameSite': 'None',
+                    'domain': 'office.reso.ru',
+                },
+            ],
     }
 
     def __init__(self) -> None:
         """Account manager initial method."""
         # FIXME token
-        self.bot = TeleBot('')
+        self.bot = TeleBot('6486270881:AAFMgY_fX8_hlb9pr-9XSiLCv7TPLRS6IT0')
         self.chat = 408972919
 
     @retry
@@ -59,7 +56,7 @@ class MessageManager(object):
             self.bot.pin_chat_message(chat_id=self.chat, message_id=msg.message_id)
 
     @retry
-    def get_telegram_cookies(self, hsh: str) -> Optional[Dict]:
+    def get_telegram_cookies(self, hsh: str) -> Optional[List]:
         """Get cookies by hash from pinned message.
 
         Args:
@@ -77,7 +74,7 @@ class MessageManager(object):
             return None
 
     @retry
-    def set_telegram_cookies(self, cookies: Dict, hsh: str) -> None:
+    def set_telegram_cookies(self, cookies: List, hsh: str) -> None:
         """Set new cookies to pinned message by hash.
 
         Args:
@@ -85,7 +82,7 @@ class MessageManager(object):
             hsh: user identification hash.
         """
         pinned = self.bot.get_chat(self.chat).pinned_message
-        as_json = json.loads(pinned.text)
+        as_json: Dict[str, List] = json.loads(pinned.text)
         as_json[hsh] = cookies
         self.bot.edit_message_text(chat_id=self.chat, message_id=pinned.message_id, text=json.dumps(as_json))
 

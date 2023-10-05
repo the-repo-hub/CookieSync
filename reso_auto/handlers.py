@@ -83,7 +83,7 @@ def exception_run_handler(fn: Callable) -> Callable:
     return inner
 
 
-def raise_error(error_txt: str) -> None:
+def raise_error(error_txt: str) -> Any:
     """Raise window with error."""
     print(error_txt)
-    exit(1)
+    return exit(1)

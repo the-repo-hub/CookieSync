@@ -32,7 +32,7 @@ class Console:
                 cls.manager.reinit()
                 cls.accounts = list(json.loads(cls.manager.bot.get_chat(chat_id=cls.manager.chat).pinned_message.text).keys())
             else:
-                exit()
+                exit(0)
 
     @classmethod
     def _available_accounts_print(cls) -> None:
