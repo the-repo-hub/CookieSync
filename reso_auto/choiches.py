@@ -20,3 +20,4 @@ class ErrorMessages(Enum):
     invalid_ini_field = 'Проблемы с ини-файлом: поле {field} не валидно'
     invalid_ini_value = 'Проблемы с ини-файлом: значение {value} в поле {field} не валидно'
     invalid_cookies = 'Необходимые куки имеют значение None'
+    token_error = 'Невалидный токен в settings.py'

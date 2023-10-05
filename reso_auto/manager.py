@@ -1,10 +1,11 @@
 """Pinned message manager module."""
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Union
 
 from telebot import TeleBot
 
+from reso_auto.choiches import ErrorMessages
 from reso_auto.handlers import retry
 from reso_auto.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
 
@@ -38,13 +39,13 @@ class MessageManager(object):
                 chat_id=self.chat,
                 message_id=pinned.message_id,
                 text=json.dumps(self.message_sample),
-            )
+            ) if pinned.text != json.dumps(self.message_sample) else None
         else:
             msg = self.bot.send_message(chat_id=self.chat, text=json.dumps(self.message_sample))
             self.bot.pin_chat_message(chat_id=self.chat, message_id=msg.message_id)
 
     @retry
-    def get_telegram_cookies(self, hsh: str) -> Optional[List]:
+    def get_telegram_cookies(self, hsh: str) -> Union[str, List]:
         """Get cookies by hash from pinned message.
 
         Args:
@@ -53,13 +54,16 @@ class MessageManager(object):
         Returns:
             Telegram cookies dictionary or None, if hash does not exist.
         """
-        pinned = self.bot.get_chat(self.chat).pinned_message
+        try:
+            pinned = self.bot.get_chat(self.chat).pinned_message
+        except Exception:
+            return ErrorMessages.token_error.value
         if not pinned:
             self.reinit()
         try:
             return json.loads(pinned.text)[hsh]
         except KeyError:
-            return None
+            return ErrorMessages.invalid_hash.value
 
     @retry
     def set_telegram_cookies(self, cookies: List, hsh: str) -> None:

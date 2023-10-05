@@ -1,5 +1,6 @@
 import time
 from configparser import ConfigParser, SectionProxy
+from os import devnull
 from typing import Any, Dict, List, Tuple, Type
 
 from selenium.common.exceptions import NoSuchElementException
@@ -36,7 +37,7 @@ class BrowserDetector:
             self.klass = self.browserDictionary[name][0]
         except KeyError:
             raise_error(ErrorMessages.invalid_browser.value.format(browser=self.name))
-        self.service = self.browserDictionary[name][1]()
+        self.service = self.browserDictionary[name][1](log_output=devnull)
         self.options = self.browserDictionary[name][2]()
         if isinstance(self.options, FirefoxOptions):
             self.options.set_preference("general.useragent.override", user_agent)
@@ -89,9 +90,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         super().__init__(service=self.service, options=self.options)
         self.need_to_set_telegram_cookies = False
         self.last_cookies = self.manager.get_telegram_cookies(self.hash)
-        if not self.last_cookies:
+        if isinstance(self.last_cookies, str):
             self.quit()
-            raise_error(ErrorMessages.invalid_hash.value)
+            raise_error(self.last_cookies)
 
     def delete_reso_cookies(self) -> None:
         self.delete_cookie(CookieFields.aspnet.value)
@@ -99,9 +100,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def get_and_insert_cookies(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if not tele_cookies:
+        if isinstance(tele_cookies, str):
             self.quit()
-            raise_error(ErrorMessages.invalid_hash.value)
+            raise_error(tele_cookies)
         self.delete_reso_cookies()
         for line in tele_cookies:
             self.add_cookie(line)
@@ -128,6 +129,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def logged_in(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
+        if isinstance(tele_cookies, str):
+            self.quit()
+            raise_error(tele_cookies)
         browser_cookies = self.get_browser_cookies()
 
         if self.need_to_set_telegram_cookies:
@@ -146,9 +150,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def logged_out(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if not tele_cookies:
+        if isinstance(tele_cookies, str):
             self.quit()
-            raise_error(ErrorMessages.invalid_hash.value)
+            raise_error(tele_cookies)
         if self.last_cookies != tele_cookies:
             self.get_and_insert_cookies()
             self.get(self.url_main)

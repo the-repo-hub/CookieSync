@@ -59,6 +59,8 @@ class Console(object):
             cls._initial_error_handler(error.error_code)
         except AttributeError:
             cls._initial_error_handler(0)
+        except Exception:
+            cls._initial_error_handler(HTTPStatus.UNAUTHORIZED)
         command = ''
         menu = '\nКоманды:\n1 - Добавить новый аккаунт\n2 - Удалить существующий аккаунт\n3 - Сбросить сообщение к изначальным настройкам\n4 - Выход'
 
