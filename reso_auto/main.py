@@ -1,7 +1,7 @@
 import os
 import time
 from configparser import ConfigParser, SectionProxy
-from typing import Dict, Optional, Tuple, Type, TypeAlias, List
+from typing import Dict, List, Tuple, Type, TypeAlias
 
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver import Chrome, Edge, Firefox
@@ -97,8 +97,8 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             raise_error(ErrorMessages.invalid_hash.value)
 
     def delete_reso_cookies(self) -> None:
-        self.delete_cookie(CookieFields.ASPNET)
-        self.delete_cookie(CookieFields.ResoOffice60)
+        self.delete_cookie(CookieFields.aspnet)
+        self.delete_cookie(CookieFields.reso_office60)
 
     def get_and_insert_cookies(self) -> None:
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
@@ -122,10 +122,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         return False
 
     def get_browser_cookies(self) -> List:
-        cookies = [self.get_cookie(CookieFields.ASPNET.value), self.get_cookie(CookieFields.ResoOffice60.value)]
-        for i in range(len(cookies)):
-            cookies[i].pop('domain')
-            cookies[i]['sameSite'] = 'None'
+        cookies = [self.get_cookie(CookieFields.aspnet.value), self.get_cookie(CookieFields.reso_office60.value)]
+        if None in cookies:
+            return raise_error(ErrorMessages.invalid_cookies.value)
         return cookies
 
     def logged_in(self) -> None:

@@ -1,39 +1,27 @@
 """Pinned message manager module."""
 
 import json
-from typing import Dict, Optional, List
+from typing import Dict, List, Optional
 
 from telebot import TeleBot
 
 from reso_auto.handlers import retry
 
 
+def get_message_sample() -> Dict:
+    """Read json file with message sample.
+
+    Returns:
+        JSON message sample.
+    """
+    with open('message_sample.json') as dct:
+        return json.loads(dct.read())
+
+
 class MessageManager(object):
     """Account manager class for manage pinned message data."""
 
-    message_sample = {
-        'test':
-            [
-                {
-                    'name': 'ASP.NET_SessionId',
-                    'value': 'yipellveieo2a3zqeqzp0i4x',
-                    'path': '/',
-                    'secure': False,
-                    'httpOnly': True,
-                    'sameSite': 'None',
-                    'domain': 'office.reso.ru',
-                },
-                {
-                    'name': 'ResoOffice60',
-                    'value': 'D8F3B2901DF22BB1B2BBFE1C60038B9428298E0B4F2F89677388C3A0CAC19ECF0C4234101414E289B0247EB1B39430F0C6A5DBD483BFF0A7DF198B42AEB3039BABAFB8403F1011D02CA712DE98C9D9BA3FF65A41071F98078D7CFA4E98210400704D891FC4969BB3CCB5BD4A3FA46AAC',
-                    'path': '/',
-                    'secure': False,
-                    'httpOnly': True,
-                    'sameSite': 'None',
-                    'domain': 'office.reso.ru',
-                },
-            ],
-    }
+    message_sample = get_message_sample()
 
     def __init__(self) -> None:
         """Account manager initial method."""
