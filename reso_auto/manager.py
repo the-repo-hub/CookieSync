@@ -35,11 +35,12 @@ class MessageManager(object):
         """Initialize or reinitialize pinned message."""
         pinned = self.bot.get_chat(self.chat).pinned_message
         if pinned:
-            self.bot.edit_message_text(
-                chat_id=self.chat,
-                message_id=pinned.message_id,
-                text=json.dumps(self.message_sample),
-            ) if pinned.text != json.dumps(self.message_sample) else None
+            if pinned.text != json.dumps(self.message_sample):
+                self.bot.edit_message_text(
+                    chat_id=self.chat,
+                    message_id=pinned.message_id,
+                    text=json.dumps(self.message_sample),
+                )
         else:
             msg = self.bot.send_message(chat_id=self.chat, text=json.dumps(self.message_sample))
             self.bot.pin_chat_message(chat_id=self.chat, message_id=msg.message_id)

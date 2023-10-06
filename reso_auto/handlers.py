@@ -1,5 +1,6 @@
+"""Error handlers and decorators for program."""
+
 import time
-from random import randint
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from selenium.common.exceptions import (
@@ -12,10 +13,22 @@ from urllib3.exceptions import MaxRetryError
 
 
 def retry(fn: Callable) -> Callable:
-    """Retry decorator for handle errors."""
+    """Retry decorator for handle errors.
+
+    Args:
+        fn: function that will be wrapped.
+
+    Returns:
+        Decorator closure.
+    """
 
     def inner(*args: Tuple, **kwargs: Dict) -> Optional[Callable]:
-        """Inner decorator function."""
+        """Inner decorator function.
+
+        Args:
+            args: Tuple with any values.
+            kwargs: Dictionary with any variables and values.
+        """
         err_counter = 0
         err_type = ''
         while err_counter <= 10:
@@ -37,15 +50,32 @@ def retry(fn: Callable) -> Callable:
                 err_counter += 1
                 err_type = 'ApiTelegramException'
 
-            time.sleep(randint(1, 7))
-        raise_error(f"Проблемы с интернетом.\nТип ошибки: {err_type}\nФункция: {fn.__name__}")
+            time.sleep(2)
+        raise_error(
+            'Проблемы с интернетом.\nТип ошибки: {err_type}\nФункция: {name}'.format(
+                err_type=err_type, name=fn.__name__,
+            ),
+        )
         return None
 
     return inner
 
 
 def exception_run_handler(fn: Callable) -> Callable:
+    """Run function exception handler that.
+
+    Args:
+        fn: function that will be wrapped.
+    """
+
     def inner(obj: WebDriver, *args: Tuple, **kwargs: Dict) -> Any:
+        """Inner decorator function.
+
+        Args:
+            obj: ResoBrowser object.
+            args: Tuple with any values.
+            kwargs: Dictionary with any variables and values.
+        """
         try:
             return fn(obj, *args, **kwargs)
         except NoSuchWindowException:
@@ -82,5 +112,6 @@ def exception_run_handler(fn: Callable) -> Callable:
 
 def raise_error(error_txt: str) -> Any:
     """Raise window with error."""
+    # TODO ctype for windows
     print(error_txt)
     return exit(1)
