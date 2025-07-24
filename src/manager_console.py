@@ -7,7 +7,7 @@ from typing import List
 
 from telebot.apihelper import ApiTelegramException
 
-from reso_auto.manager import MessageManager
+from src.manager import MessageManager
 
 
 class Console(object):

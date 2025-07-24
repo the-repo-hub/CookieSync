@@ -16,10 +16,10 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
 
-from reso_auto.choiches import CookieFields, ErrorMessages
-from reso_auto.handlers import exception_run_handler, raise_error
-from reso_auto.manager import MessageManager
-from reso_auto.settings import INI_FILE_PATH
+from src.choiches import CookieFields, ErrorMessages
+from src.handlers import exception_run_handler, raise_error
+from src.manager import MessageManager
+from src.settings import INI_FILE_PATH
 
 BaseDriverMeta: Type = type(WebDriver)
 
@@ -95,7 +95,7 @@ class BrowserMeta(BaseDriverMeta):
         except KeyError:
             return raise_error(ErrorMessages.no_ini_options.value)
         for field, field_content in options.items():
-            if field not in {'hash', 'browser', 'user-agent'}:
+            if field not in {'hash', 'browser', 'user-agent', 'proxy-server'}:
                 raise_error(ErrorMessages.invalid_ini_field.value.format(field=field))
             if not options.get(field):
                 raise_error(ErrorMessages.invalid_ini_value.value.format(value=field_content, field=field))
@@ -187,7 +187,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.last_cookies = browser_cookies
 
         elif browser_cookies != tele_cookies:
-            # somebody changed cookies, but my cookies is actual
+            # somebody changed cookies, but my cookies is normal
             self.obtain_and_insert_cookies()
 
     def logged_out(self) -> None:

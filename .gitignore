@@ -1,9 +1,9 @@
 .idea
 .git
 /build/
-/poetry.lock
 /.venv/
-/reso_auto/geckodriver.log
+/src/geckodriver.log
 /.mypy_cache/
-/reso_auto/tests/.pytest_cache/
-/reso_auto/tests/geckodriver.log
+/tests/.pytest_cache/
+/tests/geckodriver.log
+/.env

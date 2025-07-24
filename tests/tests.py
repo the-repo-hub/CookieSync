@@ -5,8 +5,8 @@ import unittest
 from threading import Thread
 from time import sleep
 
-from reso_auto.main import ResoBrowser
-from reso_auto.manager import MessageManager
+from src.main import ResoBrowser
+from src.manager import MessageManager
 
 
 class ResoTestCase(unittest.TestCase):

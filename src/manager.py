@@ -5,9 +5,9 @@ from typing import Dict, List, Union
 
 from telebot import TeleBot
 
-from reso_auto.choiches import ErrorMessages
-from reso_auto.handlers import retry
-from reso_auto.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
+from src.choiches import ErrorMessages
+from src.handlers import retry
+from src.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
 
 
 def get_message_sample() -> Dict:
