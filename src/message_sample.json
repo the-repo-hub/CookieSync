@@ -6,7 +6,8 @@
       "path": "/",
       "secure": false,
       "httpOnly": true,
-      "sameSite": "None"
+      "sameSite": "None",
+      "domain": ".reso.ru"
     },
     {
       "name": "ResoOffice60",
@@ -14,7 +15,8 @@
       "path": "/",
       "secure": false,
       "httpOnly": true,
-      "sameSite": "None"
+      "sameSite": "None",
+      "domain": ".reso.ru"
     }
   ]
 }
