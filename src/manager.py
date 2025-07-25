@@ -2,11 +2,12 @@
 
 import json
 from functools import cached_property
-from typing import Dict, List, Union
+from typing import Dict, List
 
 from telebot import TeleBot
+from telebot.apihelper import ApiTelegramException
 
-from src.choiches import ErrorMessages
+from src.exceptions import InvalidBotToken, InvalidHash
 from src.handlers import retry
 from src.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
 
@@ -45,7 +46,7 @@ class MessageManager(object):
             self.bot.pin_chat_message(chat_id=self.chat, message_id=msg.message_id)
 
     @retry
-    def get_telegram_cookies(self, hsh: str) -> Union[str, List]:
+    def get_telegram_cookies(self, hsh: str) -> List:
         """Get cookies by hash from pinned message.
 
         Args:
@@ -56,14 +57,15 @@ class MessageManager(object):
         """
         try:
             pinned = self.bot.get_chat(self.chat).pinned_message
-        except Exception:
-            return ErrorMessages.token_error.value
+        except ApiTelegramException:
+            # it gonna handled in handlers.py so it raises again in decorator
+            raise InvalidBotToken
         if not pinned:
             self.reinit()
         try:
             return json.loads(pinned.text)[hsh]
         except KeyError:
-            return ErrorMessages.invalid_hash.value
+            raise InvalidHash
 
     @retry
     def set_telegram_cookies(self, cookies: List, hsh: str) -> None:

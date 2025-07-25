@@ -5,7 +5,7 @@ from configparser import ConfigParser, SectionProxy
 from os import devnull
 from typing import Any, Dict, List, Tuple, Type
 
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -16,13 +16,13 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
 
-from src.choiches import CookieFields, ErrorMessages
-from src.handlers import exception_run_handler, raise_error
+from src.choiches import CookieFields
+from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
+    BrowserNotFoundError, BrowserNotInstalled
+from src.handlers import exception_run_handler
 from src.manager import MessageManager
-from src.settings import INI_FILE_PATH
 
 BaseDriverMeta: Type = type(WebDriver)
-
 
 class BrowserDetector(object):
     """Detect browser class and his services and options."""
@@ -44,7 +44,7 @@ class BrowserDetector(object):
         try:
             self.klass = self.browser_dictionary[name][0]
         except KeyError:
-            raise_error(ErrorMessages.invalid_browser.value.format(browser=self.name))
+            raise BrowserNotFoundError(f'Браузер {self.name} не поддерживается программой. Проверьте корректность ввода данных в reso.ini файле.')
         self.service = self.browser_dictionary[name][1](log_output=devnull)
         self.options = self.browser_dictionary[name][2]()
         if isinstance(self.options, FirefoxOptions):
@@ -76,6 +76,7 @@ class BrowserMeta(BaseDriverMeta):
         new_browser_class.hash = options.get('hash', 'None')
         new_browser_class.service = browser.service
         new_browser_class.options = browser.options
+        new_browser_class.browser_name = options['browser'].capitalize()
         return new_browser_class
 
     @classmethod
@@ -86,20 +87,20 @@ class BrowserMeta(BaseDriverMeta):
             SectionProxy instance (like dict) with hash, user-agent and browser fields.
         """
         ini_options = ConfigParser()
-        #fixme
-        ini_content = ini_options.read('reso.ini', encoding='UTF-8')
+        #fixme: hardcode filenames
+        ini_content = ini_options.read(filenames='reso.ini', encoding='UTF-8')
         # нет файла
         if not ini_content:
-            raise_error(ErrorMessages.no_ini.value)
+            raise NoIniFileError
         try:
             options = ini_options['options']
         except KeyError:
-            return raise_error(ErrorMessages.no_ini_options.value)
+            raise NoIniOptionsError
         for field, field_content in options.items():
             if field not in {'hash', 'browser', 'user-agent', 'proxy-server'}:
-                raise_error(ErrorMessages.invalid_ini_field.value.format(field=field))
+                raise InvalidIniFieldError
             if not options.get(field):
-                raise_error(ErrorMessages.invalid_ini_value.value.format(value=field_content, field=field))
+                raise InvalidIniValueError
         return options
 
 
@@ -113,27 +114,26 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     hash: str
     service: FirefoxService
     options: FirefoxOptions
+    browser_name: str
 
     def __init__(self) -> None:
         """Initialize method for class."""
-        super().__init__(service=self.service, options=self.options)
+        #browser in ini file is correct, but not installed in system
+        try:
+            super().__init__(service=self.service, options=self.options)
+        except NoSuchDriverException:
+            raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
         self.need_to_set_telegram_cookies = False
         self.last_cookies = self.manager.get_telegram_cookies(self.hash)
-        if isinstance(self.last_cookies, str):
-            self.quit()
-            raise_error(self.last_cookies)
 
     def delete_reso_cookies(self) -> None:
         """Delete only necessary reso cookies."""
-        self.delete_cookie(CookieFields.aspnet.value)
-        self.delete_cookie(CookieFields.reso_office60.value)
+        self.delete_cookie(CookieFields.aspnet)
+        self.delete_cookie(CookieFields.reso_office60)
 
     def obtain_and_insert_cookies(self) -> None:
         """Get cookies from telegram and insert them in browser."""
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if isinstance(tele_cookies, str):
-            self.quit()
-            raise_error(tele_cookies)
         self.delete_reso_cookies()
         for line in tele_cookies:
             self.add_cookie(line)
@@ -159,32 +159,24 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             List with dict cookies.
         """
         cookies = [
-            self.get_cookie(CookieFields.aspnet.value),
-            self.get_cookie(CookieFields.reso_office60.value),
+            self.get_cookie(CookieFields.aspnet),
+            self.get_cookie(CookieFields.reso_office60),
         ]
-        # selenium bug, when point adds to domain
-        if all(cookies):
-            return cookies
-        return raise_error(ErrorMessages.invalid_cookies.value)
+        return cookies
 
     def logged_in(self) -> None:
         """Logic when browser is logged in service."""
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if isinstance(tele_cookies, str):
-            self.quit()
-            raise_error(tele_cookies)
         browser_cookies = self.get_browser_cookies()
 
         if self.need_to_set_telegram_cookies:
-            # somebody logged in
+            # somebody logged in. he has his own reso60, we need to unify this
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.need_to_set_telegram_cookies = False
-
         elif self.last_cookies != browser_cookies:
             # i'm logged in, but cookies changed by server
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.last_cookies = browser_cookies
-
         elif browser_cookies != tele_cookies:
             # somebody changed cookies, but my cookies is normal
             self.obtain_and_insert_cookies()
@@ -192,9 +184,6 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     def logged_out(self) -> None:
         """Logic, when browser is logged out from service."""
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if isinstance(tele_cookies, str):
-            self.quit()
-            raise_error(tele_cookies)
         if self.last_cookies == tele_cookies:
             self.need_to_set_telegram_cookies = True
         else:
@@ -217,5 +206,5 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
 
 if __name__ == '__main__':
-    reso = ResoBrowser()
-    reso.run()
+    with ResoBrowser() as driver:
+        driver.run()
