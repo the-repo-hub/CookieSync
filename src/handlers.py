@@ -10,7 +10,7 @@ from selenium.common.exceptions import (
 from selenium.webdriver.remote.webdriver import WebDriver
 from telebot.apihelper import ApiTelegramException
 from urllib3.exceptions import MaxRetryError
-
+from sys import exit
 
 def retry(fn: Callable) -> Callable:
     """Retry decorator for handle errors.

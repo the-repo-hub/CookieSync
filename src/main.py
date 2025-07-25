@@ -86,7 +86,8 @@ class BrowserMeta(BaseDriverMeta):
             SectionProxy instance (like dict) with hash, user-agent and browser fields.
         """
         ini_options = ConfigParser()
-        ini_content = ini_options.read(INI_FILE_PATH, encoding='UTF-8')
+        #fixme
+        ini_content = ini_options.read('reso.ini', encoding='UTF-8')
         # нет файла
         if not ini_content:
             raise_error(ErrorMessages.no_ini.value)
@@ -163,8 +164,6 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         ]
         # selenium bug, when point adds to domain
         if all(cookies):
-            cookies[0].pop('domain')  # type: ignore
-            cookies[1].pop('domain')  # type: ignore
             return cookies
         return raise_error(ErrorMessages.invalid_cookies.value)
 
