@@ -1,6 +1,7 @@
 """Pinned message manager module."""
 
 import json
+from functools import cached_property
 from typing import Dict, List, Union
 
 from telebot import TeleBot
@@ -10,20 +11,18 @@ from src.handlers import retry
 from src.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
 
 
-def get_message_sample() -> Dict:
-    """Read json file with message sample.
-
-    Returns:
-        JSON message sample.
-    """
-    with open(MESSAGE_SAMPLE_PATH) as dct:
-        return json.loads(dct.read())
-
-
 class MessageManager(object):
     """Account manager class for manage pinned message data."""
 
-    message_sample = get_message_sample()
+    @cached_property
+    def message_sample(self) -> Dict:
+        """Read json file with message sample.
+
+            Returns:
+                JSON message sample.
+            """
+        with open(MESSAGE_SAMPLE_PATH) as dct:
+            return json.loads(dct.read())
 
     def __init__(self) -> None:
         """Account manager initial method."""
