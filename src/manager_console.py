@@ -108,4 +108,7 @@ class Console(object):
 
 
 if __name__ == '__main__':
-    Console.main()
+    try:
+        Console.main()
+    except KeyboardInterrupt:
+        exit(0)
