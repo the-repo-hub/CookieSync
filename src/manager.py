@@ -59,13 +59,13 @@ class MessageManager(object):
             pinned = self.bot.get_chat(self.chat).pinned_message
         except ApiTelegramException:
             # it gonna handled in handlers.py so it raises again in decorator
-            raise InvalidBotToken
+            raise InvalidBotToken(InvalidBotToken.msg)
         if not pinned:
             self.reinit()
         try:
             return json.loads(pinned.text)[hsh]
         except KeyError:
-            raise InvalidHash
+            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
 
     @retry
     def set_telegram_cookies(self, cookies: List, hsh: str) -> None:

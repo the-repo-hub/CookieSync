@@ -91,16 +91,16 @@ class BrowserMeta(BaseDriverMeta):
         ini_content = ini_options.read(filenames='reso.ini', encoding='UTF-8')
         # нет файла
         if not ini_content:
-            raise NoIniFileError
+            raise NoIniFileError(NoIniFileError.msg)
         try:
             options = ini_options['options']
         except KeyError:
-            raise NoIniOptionsError
+            raise NoIniOptionsError(NoIniFileError.msg)
         for field, field_content in options.items():
             if field not in {'hash', 'browser', 'user-agent', 'proxy-server'}:
-                raise InvalidIniFieldError
+                raise InvalidIniFieldError(InvalidIniFieldError.msg.format(field=field))
             if not options.get(field):
-                raise InvalidIniValueError
+                raise InvalidIniValueError(InvalidIniValueError.msg.format(field=field, value=field_content))
         return options
 
 
@@ -170,23 +170,27 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         browser_cookies = self.get_browser_cookies()
 
         if self.need_to_set_telegram_cookies:
-            # somebody logged in. he has his own reso60, we need to unify this
+            # зашел текущий клиент, у него теперь другие куки и нужно поменять в телеге
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.need_to_set_telegram_cookies = False
+            self.last_cookies = browser_cookies
         elif self.last_cookies != browser_cookies:
-            # i'm logged in, but cookies changed by server
+            # я залогинен, но ресо сервер изменил мне куки
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.last_cookies = browser_cookies
         elif browser_cookies != tele_cookies:
-            # somebody changed cookies, but my cookies is normal
+            # другой клиент изменил кукисы на свои, рабочие, но при этом я тоже залогинен, так что нужно унифицировать
             self.obtain_and_insert_cookies()
 
     def logged_out(self) -> None:
         """Logic, when browser is logged out from service."""
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
         if self.last_cookies == tele_cookies:
+            # в телеге лежат неверные куки, которые я пытался использовать
             self.need_to_set_telegram_cookies = True
         else:
+            # кто-то изменил куки и они рабочие с высокой вероятностью
+            self.need_to_set_telegram_cookies = False
             self.obtain_and_insert_cookies()
             self.get(self.url_main)
 
