@@ -9,20 +9,20 @@ from telebot.apihelper import ApiTelegramException
 
 from src.exceptions import InvalidBotToken, InvalidHash
 from src.handlers import retry
-from src.settings import BOT_TOKEN, CHAT_ID, MESSAGE_SAMPLE_PATH
+from src.settings import BOT_TOKEN, CHAT_ID
 
 
 class MessageManager(object):
     """Account manager class for manage pinned message data."""
 
-    @cached_property
+    @property
     def message_sample(self) -> Dict:
         """Read json file with message sample.
 
             Returns:
                 JSON message sample.
             """
-        with open(MESSAGE_SAMPLE_PATH) as dct:
+        with open('message_sample.json') as dct:
             return json.loads(dct.read())
 
     def __init__(self) -> None:
