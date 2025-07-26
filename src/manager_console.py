@@ -8,7 +8,7 @@ from typing import List
 from telebot.apihelper import ApiTelegramException
 
 from src.manager import MessageManager
-
+from src.exceptions import MessageTooLong
 
 class Console(object):
     """Pinned message console class."""
@@ -27,9 +27,13 @@ class Console(object):
         if command == '1':
             name = input('Имя, которое будет добавлено к хэшу (можно оставить пустым): ')
             hsh = '{hash}_{name}'.format(hash=str(getrandbits(cls.bits)), name=name)
-            cls.manager.add_account(hsh)
-            print('Новый хэш: {hsh}'.format(hsh=hsh), end='\n\n')
-            cls.accounts.append(hsh)
+            try:
+                cls.manager.add_account(hsh)
+            except MessageTooLong:
+                print(MessageTooLong.msg)
+            else:
+                print('Новый хэш: {hsh}'.format(hsh=hsh), end='\n\n')
+                cls.accounts.append(hsh)
 
         elif command == '2':
             num = int(input('Номер хэша, который необходимо удалить: ')) - 1

@@ -1,3 +1,5 @@
+from settings import TELEGRAM_MSG_LIMIT
+
 class ResoException(Exception):
     pass
 
@@ -30,3 +32,6 @@ class InvalidBotToken(TelegramError):
 
 class InvalidHash(TelegramError):
     msg = 'Невалидный хэш "{hash}" в reso.ini, такой хэш отсутствует на сервере.'
+
+class MessageTooLong(TelegramError):
+    msg = f'При добавлении нового аккаунта будет превышен лимит {TELEGRAM_MSG_LIMIT} байт (символов). Такое количество аккаунтов создать не получится'
