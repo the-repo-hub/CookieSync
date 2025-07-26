@@ -21,6 +21,7 @@ from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldErr
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
 from src.manager import MessageManager
+import os
 
 BaseDriverMeta: Type = type(WebDriver)
 
@@ -41,6 +42,9 @@ class BrowserDetector(object):
             user_agent: string User-Agent value.
         """
         self.name = name
+        if self.name == 'Edge':
+            # https://github.com/seleniumhq/selenium/issues/16073
+            os.environ["SE_DRIVER_MIRROR_URL"] = "https://msedgedriver.microsoft.com"
         try:
             self.klass = self.browser_dictionary[name][0]
         except KeyError:
