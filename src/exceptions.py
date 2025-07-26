@@ -1,4 +1,4 @@
-from settings import TELEGRAM_MSG_LIMIT
+from src.settings import TELEGRAM_MSG_LIMIT
 
 class ResoException(Exception):
     pass
