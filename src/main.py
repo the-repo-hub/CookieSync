@@ -135,13 +135,11 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self.delete_cookie(CookieFields.aspnet)
         self.delete_cookie(CookieFields.reso_office60)
 
-    def obtain_and_insert_cookies(self) -> None:
+    def insert_cookies(self, tele_cookies: List) -> None:
         """Get cookies from telegram and insert them in browser."""
-        tele_cookies = self.manager.get_telegram_cookies(self.hash)
         self.delete_reso_cookies()
         for line in tele_cookies:
             self.add_cookie(line)
-        self.last_cookies = tele_cookies
 
     def auth_complete(self) -> bool:
         """Check is authentication was complete.
@@ -184,7 +182,8 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.last_cookies = browser_cookies
         elif browser_cookies != tele_cookies:
             # другой клиент изменил кукисы на свои, рабочие, но при этом я тоже залогинен, так что нужно унифицировать
-            self.obtain_and_insert_cookies()
+            self.insert_cookies(tele_cookies)
+            self.last_cookies = tele_cookies
 
     def logged_out(self) -> None:
         """Logic, when browser is logged out from service."""
@@ -195,7 +194,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         else:
             # кто-то изменил куки и они рабочие с высокой вероятностью
             self.need_to_set_telegram_cookies = False
-            self.obtain_and_insert_cookies()
+            self.insert_cookies(tele_cookies)
             self.get(self.url_main)
 
     @exception_run_handler
@@ -203,7 +202,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         """Run main logic."""
         # if it will be removed, don't forget about implicitly wait
         self.get(self.url_main)
-        self.obtain_and_insert_cookies()
+        self.insert_cookies(self.last_cookies)
         self.get(self.url_main)
         while True:
             if self.auth_complete():
