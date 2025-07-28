@@ -68,13 +68,6 @@ def retry(fn: Callable) -> Callable:
         )
     return inner
 
-def _alert_present(driver):
-    try:
-        driver.switch_to.alert()
-        return True
-    except NoAlertPresentException:
-        return False
-
 
 def exception_run_handler(fn: Callable) -> Callable:
     """Run function exception handler that.
@@ -103,7 +96,7 @@ def exception_run_handler(fn: Callable) -> Callable:
                     exit(0)
             except UnexpectedAlertPresentException:
                 # raises if browser had js alert
-                WebDriverWait(driver, 300).until_not(lambda d: _alert_present(d))
+                pass
             except InvalidCookieDomainException:
                 # raises if cookie adding attempt fails, for example, if self.get hasn't called
                 pass
