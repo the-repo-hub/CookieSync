@@ -1,9 +1,10 @@
 """Main file to run main functionality."""
 
+import os
 import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Tuple, Type, Optional
 
 from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException
 from selenium.webdriver import Chrome, Edge, Firefox
@@ -21,7 +22,6 @@ from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldErr
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
 from src.manager import MessageManager
-import os
 
 BaseDriverMeta: Type = type(WebDriver)
 
@@ -53,8 +53,14 @@ class BrowserDetector(object):
         self.options = self.browser_dictionary[name][2]()
         if isinstance(self.options, FirefoxOptions):
             self.options.set_preference('general.useragent.override', user_agent)
+            self.options.set_preference("dom.webdriver.enabled", False)
+            self.options.set_preference("useAutomationExtension", False)  # на всякий случай
+            self.options.set_preference("devtools.jsonview.enabled", False)
         else:
             self.options.add_argument('--user-agent={user_agent}'.format(user_agent=user_agent))
+            self.options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            self.options.add_argument("--disable-blink-features=AutomationControlled")
+            self.options.set_capability("unhandledPromptBehavior", "ignore")
 
 
 class BrowserMeta(BaseDriverMeta):
@@ -154,7 +160,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             return True
         return False
 
-    def get_browser_cookies(self) -> List:
+    def get_browser_cookies(self) -> Optional[List]:
         """Get cookies from browser.
 
         Returns:
@@ -164,19 +170,22 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.get_cookie(CookieFields.aspnet),
             self.get_cookie(CookieFields.reso_office60),
         ]
-        return cookies
+        #иногда сетится null, чтобы избежать этого:
+        if all(cookies):
+            return cookies
+        return None
 
     def logged_in(self) -> None:
         """Logic when browser is logged in service."""
         tele_cookies = self.manager.get_telegram_cookies(self.hash)
         browser_cookies = self.get_browser_cookies()
 
-        if self.need_to_set_telegram_cookies:
+        if browser_cookies and self.need_to_set_telegram_cookies:
             # зашел текущий клиент, у него теперь другие куки и нужно поменять в телеге
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.need_to_set_telegram_cookies = False
             self.last_cookies = browser_cookies
-        elif self.last_cookies != browser_cookies:
+        elif browser_cookies and self.last_cookies != browser_cookies:
             # я залогинен, но ресо сервер изменил мне куки
             self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
             self.last_cookies = browser_cookies

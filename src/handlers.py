@@ -13,9 +13,10 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from requests import ConnectionError as ConnectionErrorRequests
 from selenium.common.exceptions import (
     InvalidCookieDomainException, InvalidSessionIdException, NoSuchWindowException, UnexpectedAlertPresentException,
-    WebDriverException,
+    WebDriverException, NoAlertPresentException
 )
 from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support.ui import WebDriverWait
 from telebot.apihelper import ApiTelegramException
 from urllib3.exceptions import MaxRetryError
 
@@ -67,6 +68,13 @@ def retry(fn: Callable) -> Callable:
         )
     return inner
 
+def _alert_present(driver):
+    try:
+        driver.switch_to.alert()
+        return True
+    except NoAlertPresentException:
+        return False
+
 
 def exception_run_handler(fn: Callable) -> Callable:
     """Run function exception handler that.
@@ -75,43 +83,47 @@ def exception_run_handler(fn: Callable) -> Callable:
         fn: function that will be wrapped.
     """
 
-    def inner(obj: WebDriver, *args: Tuple, **kwargs: Dict) -> Any:
+    def inner(driver: WebDriver, *args: Tuple, **kwargs: Dict) -> Any:
         """Inner decorator function.
 
         Args:
-            obj: ResoBrowser object.
+            driver: ResoBrowser object.
             args: Tuple with any values.
             kwargs: Dictionary with any variables and values.
         """
-        try:
-            return fn(obj, *args, **kwargs)
-        except NoSuchWindowException:
-            # raises if first tab was closed
+        while True:
             try:
-                obj.switch_to.window(obj.window_handles[0])
+                return fn(driver, *args, **kwargs)
+            except NoSuchWindowException:
+                # raises if first tab was closed
+                try:
+                    driver.switch_to.window(driver.window_handles[0])
+                except InvalidSessionIdException:
+                    driver.quit()
+                    exit(0)
+            except UnexpectedAlertPresentException:
+                # raises if browser had js alert
+                WebDriverWait(driver, 300).until_not(lambda d: _alert_present(d))
+            except InvalidCookieDomainException:
+                # raises if cookie adding attempt fails, for example, if self.get hasn't called
+                pass
             except InvalidSessionIdException:
-                obj.quit()
                 exit(0)
-        except UnexpectedAlertPresentException:
-            # raises if browser had js alert
-            pass
-        except InvalidCookieDomainException:
-            # raises if cookie adding attempt fails, for example, if self.get hasnt called
-            pass
-        except InvalidSessionIdException:
-            exit(0)
-        except IndexError:
-            obj.quit()
-            exit(0)
-        except WebDriverException:
-            obj.quit()
-            exit(0)
-        except MaxRetryError:
-            exit(0)
-        # если закрыть браузер при выполнении второго гет запроса
-        except RemoteDisconnected:
-            exit(0)
+            except IndexError:
+                driver.quit()
+                break
+            except WebDriverException:
+                driver.quit()
+                break
+            except MaxRetryError:
+                break
+            # если закрыть браузер при выполнении второго гет запроса
+            except RemoteDisconnected:
+                break
+            time.sleep(1)
+        exit(0)
     return inner
+
 
 def show_error(title, message):
     system = platform.system()
