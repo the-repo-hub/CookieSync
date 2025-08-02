@@ -22,6 +22,7 @@ from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldErr
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
 from src.manager import MessageManager
+from src.settings import INI_PATH
 
 BaseDriverMeta: Type = type(WebDriver)
 
@@ -97,8 +98,7 @@ class BrowserMeta(BaseDriverMeta):
             SectionProxy instance (like dict) with hash, user-agent and browser fields.
         """
         ini_options = ConfigParser()
-        #fixme: hardcode filenames
-        ini_content = ini_options.read(filenames='reso.ini', encoding='UTF-8')
+        ini_content = ini_options.read(filenames=INI_PATH, encoding='UTF-8')
         # нет файла
         if not ini_content:
             raise NoIniFileError(NoIniFileError.msg)
