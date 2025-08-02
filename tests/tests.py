@@ -3,7 +3,10 @@
 import json
 import unittest
 from threading import Thread
-from time import sleep
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 from src.main import ResoBrowser
 from src.manager import MessageManager
@@ -40,7 +43,11 @@ class ResoTestCase(unittest.TestCase):
         browser = ResoBrowser()
         thread = Thread(target=browser.run)
         thread.start()
-        sleep(5)
+        WebDriverWait(browser, timeout=10).until(
+            EC.presence_of_element_located(
+                (By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]'),
+            ),
+        )
         self.assertTrue(thread.is_alive())
         browser.quit()
 

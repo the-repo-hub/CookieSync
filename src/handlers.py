@@ -13,10 +13,9 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from requests import ConnectionError as ConnectionErrorRequests
 from selenium.common.exceptions import (
     InvalidCookieDomainException, InvalidSessionIdException, NoSuchWindowException, UnexpectedAlertPresentException,
-    WebDriverException, NoAlertPresentException
+    WebDriverException
 )
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support.ui import WebDriverWait
 from telebot.apihelper import ApiTelegramException
 from urllib3.exceptions import MaxRetryError
 
