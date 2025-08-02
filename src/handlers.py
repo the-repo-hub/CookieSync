@@ -127,5 +127,6 @@ def show_error(title, message):
 def exception_hook(exc_type, exc_value, exc_traceback):
     error_msg = f"Произошла ошибка:\n\n{str(exc_value)}"
     show_error("Ошибка Selenium", error_msg)
+    exit(1)
 
 sys.excepthook = exception_hook
