@@ -16,7 +16,7 @@ CookieSync — это инструмент для совместного и мн
 
 ### Установка:
 ```bash
-git clone https://github.com/your-username/cookiesync.git
+git clone https://github.com/the-repo-hub/CookieSync
 cd СookieSync
 pip install -r requirements.txt
 ```
