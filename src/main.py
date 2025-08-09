@@ -1,11 +1,15 @@
 """Main file to run main functionality."""
 
+import ctypes
 import os
+import platform
+import subprocess
 import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
 from typing import Any, Dict, List, Tuple, Type, Optional
 
+from selenium.common.exceptions import InvalidSessionIdException
 from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
@@ -17,11 +21,12 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.remote.webdriver import WebDriver
 
+from client.manager import Manager
 from src.choiches import CookieFields
+from src.choiches import Systems
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
-from client.manager import Manager
 from src.settings import INI_PATH, SERVER_PORT, SERVER_ADDRESS
 
 BaseDriverMeta: Type = type(WebDriver)
@@ -134,7 +139,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         except NoSuchDriverException:
             raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
         self.need_to_set_telegram_cookies = False
-        self.last_cookies = self.manager.get_cookies(self.hash)
+        self.last_cookies = None
 
     def delete_reso_cookies(self) -> None:
         """Delete only necessary reso cookies."""
@@ -210,6 +215,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     def run(self) -> None:
         """Run main logic."""
         # if it will be removed, don't forget about implicitly wait
+        self.last_cookies = self.manager.get_cookies(self.hash)
         self.get(self.url_main)
         self.insert_cookies(self.last_cookies)
         self.get(self.url_main)
@@ -220,6 +226,19 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
                 self.logged_out()
             time.sleep(1)
 
+    @staticmethod
+    def _show_error(title, message):
+        system = platform.system()
+        if system == Systems.windows:
+            ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)  # 0x10 — иконка ошибки
+        else:
+            subprocess.run(['zenity', '--error', '--title', title, '--text', message])
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if issubclass(exc_type, InvalidSessionIdException):
+            return True
+        error_msg = f"Произошла ошибка:\n\n{str(exc_val)}"
+        self._show_error("Ошибка Selenium", error_msg)
 
 if __name__ == '__main__':
     with ResoBrowser() as driver:

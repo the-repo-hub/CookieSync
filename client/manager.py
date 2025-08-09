@@ -2,15 +2,11 @@ import json
 import socket
 from typing import Dict, List
 
-from tenacity import retry, stop_after_attempt, retry_if_exception, wait_fixed
+from tenacity import retry, stop_after_attempt, retry_if_not_exception_type, wait_fixed
 
 from resoserver.choices import Fields, Commands
 from resoserver.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
-
-def is_retriable_error(e):
-    # Игнорируем CantConnectServer, ретраим остальные
-    return not isinstance(e, CantConnectServer)
 
 class Manager(object):
 
@@ -27,7 +23,7 @@ class Manager(object):
     @retry(
         stop=stop_after_attempt(10),
         reraise=True,
-        retry=retry_if_exception(is_retriable_error),
+        retry=retry_if_not_exception_type((InvalidHash, CantConnectServer)),
         wait=wait_fixed(1),
     )
     def _send_output(self, output) -> Dict:
@@ -45,7 +41,7 @@ class Manager(object):
             Fields.command: Commands.get,
             Fields.hash: hsh,
         }
-        result = self._send_output(output, hsh)
+        result = self._send_output(output)
         if result[Fields.result] is False:
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
         return result.get(Fields.cookies)
@@ -56,7 +52,7 @@ class Manager(object):
             Fields.hash: hsh,
             Fields.cookies: cookies,
         }
-        result = self._send_output(output, hsh)
+        result = self._send_output(output)
         if result[Fields.result] is False:
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
 

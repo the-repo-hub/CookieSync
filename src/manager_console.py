@@ -1,10 +1,8 @@
 """Console for manage pinned message."""
 
-from random import getrandbits
 from typing import List
 
 from client.manager import Manager
-from src.exceptions import MessageTooLong
 from src.settings import SERVER_ADDRESS, SERVER_PORT
 
 
@@ -12,7 +10,6 @@ class Console(object):
     """Pinned message console class."""
 
     manager = Manager(SERVER_ADDRESS, SERVER_PORT)
-    bits = 128
     accounts: List
 
     def command_handler(self, command: str) -> None:
@@ -22,15 +19,10 @@ class Console(object):
             command: stringify num of option
         """
         if command == '1':
-            name = input('Имя, которое будет добавлено к хэшу (можно оставить пустым): ')
-            hsh = '{hash}_{name}'.format(hash=str(getrandbits(self.bits)), name=name)
-            try:
-                self.manager.add_account(hsh)
-            except MessageTooLong:
-                print(MessageTooLong.msg)
-            else:
-                print('Новый хэш: {hsh}'.format(hsh=hsh), end='\n\n')
-                self.accounts.append(hsh)
+            name = input('Название аккаунта: ')
+            self.manager.add_account(name)
+            print('Новый аккаунт: {hsh}'.format(hsh=name), end='\n\n')
+            self.accounts.append(name)
 
         elif command == '2':
             if not self.accounts:

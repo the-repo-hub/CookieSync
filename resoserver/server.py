@@ -37,16 +37,16 @@ class Server:
         # {123456_test: {'aspnet': 'dfsdfssd'}}
         self._accounts = {}
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(100)
         self.socket.setsockopt(
             socket.SOL_SOCKET,  # Уровень сокета
             socket.SO_REUSEADDR,  # Разрешить переиспользование адреса
             1  # Включить (1 = True)
         )
-        for file in os.listdir(self.ACCOUNTS_PATH):
-            hsh = file.split('.')[0]
-            file = open(os.path.join(self.ACCOUNTS_PATH, file))
+        self.socket.bind((self.host, self.port))
+        self.socket.listen(100)
+        for filename in os.listdir(self.ACCOUNTS_PATH):
+            hsh = filename.split('.')[0]
+            file = open(os.path.join(self.ACCOUNTS_PATH, filename))
             self._accounts[hsh] = json.loads(file.read())
             # self._active_clients[hsh] = set()
             file.close()
