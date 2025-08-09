@@ -239,6 +239,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             return True
         error_msg = f"Произошла ошибка:\n\n{str(exc_val)}"
         self._show_error("Ошибка Selenium", error_msg)
+        return True
 
 if __name__ == '__main__':
     with ResoBrowser() as driver:

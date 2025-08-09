@@ -58,6 +58,7 @@ class Console(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if issubclass(exc_type, KeyboardInterrupt):
             return True
+        return True
 
 if __name__ == '__main__':
     Console().main()
