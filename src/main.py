@@ -21,8 +21,8 @@ from src.choiches import CookieFields
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
-from src.manager import MessageManager
-from src.settings import INI_PATH
+from client.manager import Manager
+from src.settings import INI_PATH, SERVER_PORT, SERVER_ADDRESS
 
 BaseDriverMeta: Type = type(WebDriver)
 
@@ -107,7 +107,7 @@ class BrowserMeta(BaseDriverMeta):
         except KeyError:
             raise NoIniOptionsError(NoIniFileError.msg)
         for field, field_content in options.items():
-            if field not in {'hash', 'browser', 'user-agent', 'proxy-server'}:
+            if field not in {'hash', 'browser', 'user-agent'}:
                 raise InvalidIniFieldError(InvalidIniFieldError.msg.format(field=field))
             if not options.get(field):
                 raise InvalidIniValueError(InvalidIniValueError.msg.format(field=field, value=field_content))
@@ -118,13 +118,13 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     """Main Webdriver class."""
 
     url_main = 'https://office.reso.ru/'
-    manager = MessageManager()
+    manager = Manager(SERVER_ADDRESS, SERVER_PORT)
 
     # will fill in meta:
     hash: str
     service: FirefoxService
     options: FirefoxOptions
-    browser_name: str
+    browser_name: str #capitalized
 
     def __init__(self) -> None:
         """Initialize method for class."""
@@ -134,7 +134,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         except NoSuchDriverException:
             raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
         self.need_to_set_telegram_cookies = False
-        self.last_cookies = self.manager.get_telegram_cookies(self.hash)
+        self.last_cookies = self.manager.get_cookies(self.hash)
 
     def delete_reso_cookies(self) -> None:
         """Delete only necessary reso cookies."""
@@ -177,33 +177,33 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def logged_in(self) -> None:
         """Logic when browser is logged in service."""
-        tele_cookies = self.manager.get_telegram_cookies(self.hash)
+        cookies = self.manager.get_cookies(self.hash)
         browser_cookies = self.get_browser_cookies()
 
         if browser_cookies and self.need_to_set_telegram_cookies:
             # зашел текущий клиент, у него теперь другие куки и нужно поменять в телеге
-            self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
+            self.manager.set_cookies(cookies=browser_cookies, hsh=self.hash)
             self.need_to_set_telegram_cookies = False
             self.last_cookies = browser_cookies
         elif browser_cookies and self.last_cookies != browser_cookies:
             # я залогинен, но ресо сервер изменил мне куки
-            self.manager.set_telegram_cookies(cookies=browser_cookies, hsh=self.hash)
+            self.manager.set_cookies(cookies=browser_cookies, hsh=self.hash)
             self.last_cookies = browser_cookies
-        elif browser_cookies != tele_cookies:
+        elif browser_cookies != cookies:
             # другой клиент изменил кукисы на свои, рабочие, но при этом я тоже залогинен, так что нужно унифицировать
-            self.insert_cookies(tele_cookies)
-            self.last_cookies = tele_cookies
+            self.insert_cookies(cookies)
+            self.last_cookies = cookies
 
     def logged_out(self) -> None:
         """Logic, when browser is logged out from service."""
-        tele_cookies = self.manager.get_telegram_cookies(self.hash)
-        if self.last_cookies == tele_cookies:
+        cookies = self.manager.get_cookies(self.hash)
+        if self.last_cookies == cookies:
             # в телеге лежат неверные куки, которые я пытался использовать
             self.need_to_set_telegram_cookies = True
         else:
             # кто-то изменил куки и они рабочие с высокой вероятностью
             self.need_to_set_telegram_cookies = False
-            self.insert_cookies(tele_cookies)
+            self.insert_cookies(cookies)
             self.get(self.url_main)
 
     @exception_run_handler
@@ -213,7 +213,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self.get(self.url_main)
         self.insert_cookies(self.last_cookies)
         self.get(self.url_main)
-        while True:
+        while driver.session_id:
             if self.auth_complete():
                 self.logged_in()
             else:

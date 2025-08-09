@@ -21,3 +21,5 @@ CHAT_ID = os.environ.get('CHAT_ID')
 TELEGRAM_MSG_LIMIT = 4096
 BASE_DIR = get_base_dir()
 INI_PATH = os.path.join(BASE_DIR, 'reso.ini')
+SERVER_ADDRESS = os.environ.get('SERVER_ADDRESS')
+SERVER_PORT = int(os.environ.get('SERVER_PORT'))

@@ -3,7 +3,7 @@ from src.settings import TELEGRAM_MSG_LIMIT
 class ResoException(Exception):
     pass
 
-class TelegramError(ResoException):
+class ServerError(ResoException):
     pass
 
 class IniFileError(ResoException):
@@ -27,11 +27,16 @@ class InvalidIniFieldError(IniFileError):
 class InvalidIniValueError(IniFileError):
     msg = 'Проблемы с reso.ini: значение "{value}" в поле "{field}" не валидно'
 
-class InvalidBotToken(TelegramError):
+class InvalidBotToken(ServerError):
     msg = 'Невалидный токен в .env файле'
 
-class InvalidHash(TelegramError):
+class InvalidHash(ServerError):
     msg = 'Невалидный хэш "{hash}" в reso.ini, такой хэш отсутствует на сервере.'
 
-class MessageTooLong(TelegramError):
+class MessageTooLong(ServerError):
     msg = f'При добавлении нового аккаунта будет превышен лимит {TELEGRAM_MSG_LIMIT} байт (символов). Такое количество аккаунтов создать не получится'
+
+class CantConnectServer(ServerError):
+    
+    def __init__(self, err='Невозможно подключиться к серверу, проверьте его работоспособность'):
+        super().__init__(err)
