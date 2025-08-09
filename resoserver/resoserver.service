@@ -1,0 +1,14 @@
+[Unit]
+Description=Reso socket server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt
+ExecStart=/usr/bin/python3 -m resoserver.server
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -4,8 +4,8 @@ from typing import Dict, List
 
 from tenacity import retry, stop_after_attempt, retry_if_exception, wait_fixed
 
-from server.choices import Fields, Commands
-from server.handlers import recv_data_or_none
+from resoserver.choices import Fields, Commands
+from resoserver.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
 
 def is_retriable_error(e):

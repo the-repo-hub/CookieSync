@@ -8,9 +8,8 @@ from logging.handlers import MemoryHandler
 from threading import Thread
 from typing import Dict
 
-from choices import Commands, Fields
-from handlers import recv_data_or_none
-from dotenv import load_dotenv
+from resoserver.choices import Commands, Fields
+from resoserver.handlers import recv_data_or_none
 # то, что приходит
 # {
 #     'command': 'set',
@@ -26,12 +25,11 @@ logging.basicConfig(
 mem_handler = MemoryHandler(capacity=100, target=logging.StreamHandler())
 server_logger = getLogger('ResoServer')
 server_logger.addHandler(mem_handler)
-load_dotenv()
-COOKIE_SAMPLE = os.environ.get('COOKIE_SAMPLE')
 
 class Server:
 
-    ACCOUNTS_PATH = os.path.join(os.path.dirname(__file__), 'accounts')
+    BASE_DIR = os.path.dirname(__file__)
+    ACCOUNTS_PATH = os.path.join(BASE_DIR, 'accounts')
 
     def __init__(self, host='0.0.0.0', port=9999):
         self.host = host
@@ -58,7 +56,9 @@ class Server:
 
     @cached_property
     def cookie_sample(self) -> Dict:
-        return json.loads(COOKIE_SAMPLE)
+        path = os.path.join(self.BASE_DIR, 'cookie_sample.json')
+        with open(path) as f:
+            return json.loads(f.read())
 
     def _commit(self, hsh):
         filename = f'{hsh}.json'
