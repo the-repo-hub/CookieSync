@@ -164,3 +164,12 @@ class Server:
         while True:
             client_socket, client_address = self.socket.accept()
             Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
+
+    def start(self):
+        try:
+            self.run()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.server_logger.info('Server shutting down...')
+            self.socket.close()

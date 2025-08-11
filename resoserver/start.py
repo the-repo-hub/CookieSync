@@ -22,14 +22,7 @@ def main():
     )
 
     args = parser.parse_args()
-    server = Server(args.host, args.port)
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_logger.info('Server shutting down...')
-        server.socket.close()
+    Server(args.host, args.port).start()
 
 if __name__ == "__main__":
     main()
