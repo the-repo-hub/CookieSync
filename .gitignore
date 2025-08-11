@@ -7,3 +7,5 @@
 /tests/.pytest_cache/
 /tests/geckodriver.log
 /.env
+/resoserver/key.pem
+/resoserver/cert.pem

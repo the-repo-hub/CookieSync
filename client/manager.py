@@ -7,12 +7,17 @@ from tenacity import retry, stop_after_attempt, retry_if_not_exception_type, wai
 from resoserver.choices import Fields, Commands
 from resoserver.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
+import ssl
 
 class Manager(object):
 
     def __init__(self, server_addr: str, server_port: int):
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.settimeout(10)
+        _socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _socket.settimeout(10)
+        context = ssl.create_default_context()
+        context.check_hostname = False  # Отключаем проверку имени хоста
+        context.verify_mode = ssl.CERT_NONE # Не проверяем сертификационный центр
+        self._socket = context.wrap_socket(_socket, server_hostname=server_addr)
         try:
             self._socket.connect((server_addr, server_port))
         except TimeoutError:

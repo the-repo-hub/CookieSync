@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 from functools import cached_property
 from logging import getLogger
 from logging.handlers import MemoryHandler
@@ -10,6 +11,7 @@ from typing import Dict
 
 from resoserver.choices import Commands, Fields
 from resoserver.handlers import recv_data_or_none
+
 # то, что приходит
 # {
 #     'command': 'set',
@@ -17,42 +19,54 @@ from resoserver.handlers import recv_data_or_none
 #     'cookies': {}
 # }
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-mem_handler = MemoryHandler(capacity=100, target=logging.StreamHandler())
-server_logger = getLogger('ResoServer')
-server_logger.addHandler(mem_handler)
-
 class Server:
 
     BASE_DIR = os.path.dirname(__file__)
     ACCOUNTS_PATH = os.path.join(BASE_DIR, 'accounts')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    mem_handler = MemoryHandler(capacity=100, target=logging.StreamHandler())
+    server_logger = getLogger('ResoServer')
+    server_logger.addHandler(mem_handler)
 
-    def __init__(self, host='0.0.0.0', port=9999):
+    def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
         # {123456_test: {'aspnet': 'dfsdfssd'}}
         self._accounts = {}
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(
-            socket.SOL_SOCKET,  # Уровень сокета
-            socket.SO_REUSEADDR,  # Разрешить переиспользование адреса
-            1  # Включить (1 = True)
-        )
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(100)
+        self._init_accounts()
+        self.socket = None
+        self._init_socket()
+        self.server_logger.info(f'Server listening on {self.host}:{self.port}')
+        # {123456_test: {clientSocket1, clientSocket2}}
+        # self._active_clients = {}
+
+    def _init_accounts(self):
         for filename in os.listdir(self.ACCOUNTS_PATH):
             hsh = filename.split('.')[0]
             file = open(os.path.join(self.ACCOUNTS_PATH, filename))
             self._accounts[hsh] = json.loads(file.read())
             # self._active_clients[hsh] = set()
             file.close()
-        server_logger.info(f'Server listening on {self.host}:{self.port}')
-        # {123456_test: {clientSocket1, clientSocket2}}
-        # self._active_clients = {}
+
+    def _init_socket(self):
+        _socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _socket.setsockopt(
+            socket.SOL_SOCKET,  # Уровень сокета
+            socket.SO_REUSEADDR,  # Разрешить переиспользование адреса
+            1  # Включить (1 = True)
+        )
+        _socket.bind((self.host, self.port))
+        _socket.listen(50)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            certfile=os.path.join(self.BASE_DIR, 'cert.pem'),
+            keyfile=os.path.join(self.BASE_DIR, 'key.pem'),
+        )
+        self.socket = context.wrap_socket(_socket, server_side=True)
 
     @cached_property
     def cookie_sample(self) -> Dict:
@@ -125,7 +139,7 @@ class Server:
         return json.dumps(output).encode('utf-8')
 
     def __handle_client(self, client_socket, client_address):
-        server_logger.info(f'Client connected: {client_address[0]}:{client_address[1]}')
+        self.server_logger.info(f'Client connected: {client_address[0]}:{client_address[1]}')
         while True:
             length_bytes = recv_data_or_none(client_socket, 4)
             if not length_bytes:
@@ -135,29 +149,18 @@ class Server:
             if not data:
                 break
             data = json.loads(data.decode('utf-8'))
-            server_logger.info(f'Command received: {data.get(Fields.command)}')
+            self.server_logger.info(f'Command received: {data.get(Fields.command)}')
             hsh = data.get(Fields.hash)
             # self._active_clients[hsh].add(client_socket)
             bytes_output = self._get_bytes_output(hsh, data)
             client_socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
-            server_logger.info(f'Response sent: {bytes_output}')
+            self.server_logger.info(f'Response sent: {bytes_output}')
         client_socket.close()
         # self._active_clients[hsh].pop(client_socket)
-        server_logger.info(f'Client {client_address[0]}:{client_address[1]} socket closed')
+        self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} socket closed')
 
     def run(self):
         # каждое новое подключение (одно приложение)
         while True:
             client_socket, client_address = self.socket.accept()
             Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
-
-
-if __name__ == '__main__':
-    server = Server()
-    try:
-        server.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server_logger.info('Server shutting down...')
-        server.socket.close()
