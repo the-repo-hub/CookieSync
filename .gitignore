@@ -9,3 +9,4 @@
 /.env
 /resoserver/key.pem
 /resoserver/cert.pem
+/resoserver/accounts/*
