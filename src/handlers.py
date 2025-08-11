@@ -4,7 +4,7 @@ import time
 from typing import Any, Callable, Dict, Tuple
 
 from selenium.common.exceptions import (
-    InvalidCookieDomainException, NoSuchWindowException, UnexpectedAlertPresentException
+    NoSuchWindowException, UnexpectedAlertPresentException
 )
 from selenium.webdriver.remote.webdriver import WebDriver
 
@@ -32,9 +32,6 @@ def exception_run_handler(fn: Callable) -> Callable:
                 driver.switch_to.window(driver.window_handles[0])
             except UnexpectedAlertPresentException:
                 # raises if browser had js alert
-                pass
-            except InvalidCookieDomainException:
-                # raises if cookie adding attempt fails, for example, if self.get hasn't called
                 pass
             time.sleep(1)
     return inner

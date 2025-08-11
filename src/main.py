@@ -1,9 +1,6 @@
 """Main file to run main functionality."""
 
-import ctypes
 import os
-import platform
-import subprocess
 import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
@@ -23,7 +20,6 @@ from selenium.webdriver.remote.webdriver import WebDriver
 
 from client.manager import Manager
 from src.choiches import CookieFields
-from src.choiches import Systems
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
@@ -212,35 +208,29 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.get(self.url_main)
 
     @exception_run_handler
-    def run(self) -> None:
+    def _run(self) -> None:
         """Run main logic."""
         # if it will be removed, don't forget about implicitly wait
-        self.last_cookies = self.manager.get_cookies(self.hash)
-        self.get(self.url_main)
-        self.insert_cookies(self.last_cookies)
-        self.get(self.url_main)
-        while driver.session_id:
+        while self.session_id:
             if self.auth_complete():
                 self.logged_in()
             else:
                 self.logged_out()
             time.sleep(1)
 
-    @staticmethod
-    def _show_error(title, message):
-        system = platform.system()
-        if system == Systems.windows:
-            ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)  # 0x10 — иконка ошибки
-        else:
-            subprocess.run(['zenity', '--error', '--title', title, '--text', message])
+    def start(self):
+        self.last_cookies = self.manager.get_cookies(self.hash)
+        self.get(self.url_main)
+        self.insert_cookies(self.last_cookies)
+        self.get(self.url_main)
+        self._run()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        self.manager.close()
         if issubclass(exc_type, InvalidSessionIdException):
             return True
-        error_msg = f"Произошла ошибка:\n\n{str(exc_val)}"
-        self._show_error("Ошибка Selenium", error_msg)
-        return True
+        raise exc_type(exc_val)
 
 if __name__ == '__main__':
     with ResoBrowser() as driver:
-        driver.run()
+        driver.start()

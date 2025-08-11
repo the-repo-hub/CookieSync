@@ -18,6 +18,8 @@ class Manager(object):
         context.check_hostname = False  # Отключаем проверку имени хоста
         context.verify_mode = ssl.CERT_NONE # Не проверяем сертификационный центр
         self._socket = context.wrap_socket(_socket, server_hostname=server_addr)
+        self.server_addr = server_addr
+        self.server_port = server_port
         try:
             self._socket.connect((server_addr, server_port))
         except TimeoutError:
@@ -40,6 +42,9 @@ class Manager(object):
         data = recv_data_or_none(self._socket, length)
         data = json.loads(data.decode())
         return data
+
+    def close(self):
+        self._socket.close()
 
     def get_cookies(self, hsh: str) -> List[Dict]:
         output = {

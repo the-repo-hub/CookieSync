@@ -39,23 +39,22 @@ class ResoTestCase(unittest.TestCase):
 
     def test_launch(self) -> None:
         """Test browser application launch."""
-        ResoBrowser.hash = self.test_hash
-        browser = ResoBrowser()
-        thread = Thread(target=browser.run)
-        thread.start()
-        WebDriverWait(browser, timeout=10).until(
-            ec.presence_of_element_located(
-                (By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]'),
-            ),
-        )
-        self.assertTrue(thread.is_alive())
-        browser.quit()
+        self.assertTrue(self.manager.get_cookies(self.test_hash))
+        with ResoBrowser() as browser:
+            browser.hash = self.test_hash
+            thread = Thread(target=browser.start)
+            thread.start()
+            WebDriverWait(browser, timeout=10).until(
+                ec.presence_of_element_located(
+                    (By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]'),
+                ),
+            )
 
     @classmethod
     def tearDownClass(cls) -> None:
         """Tear down method that removes testCase account."""
         cls.manager.remove_account(cls.test_hash)
-
+        cls.manager.close()
 
 if __name__ == '__main__':
     unittest.main()
