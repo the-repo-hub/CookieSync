@@ -1,4 +1,6 @@
-def recv_data_or_none(conn, n):
+from typing import Optional
+
+def recv_data_or_none(conn, n) -> Optional[bytes]:
     data = b''
     while len(data) < n:
         try:

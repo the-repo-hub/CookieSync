@@ -55,8 +55,8 @@ class BrowserDetector(object):
             self.klass = self.browser_dictionary[name][0]
         except KeyError:
             raise BrowserNotFoundError(f'Браузер {self.name} не поддерживается программой. Проверьте корректность ввода данных в reso.ini файле.')
-        self.service = self.browser_dictionary[name][1](log_output=devnull)
-        self.options = self.browser_dictionary[name][2]()
+        self.service: FirefoxService | ChromeService | EdgeService = self.browser_dictionary[name][1](log_output=devnull)
+        self.options: FirefoxOptions | ChromeOptions | EdgeOptions = self.browser_dictionary[name][2]()
         if isinstance(self.options, FirefoxOptions):
             self.options.set_preference('general.useragent.override', user_agent)
             self.options.set_preference("dom.webdriver.enabled", False)

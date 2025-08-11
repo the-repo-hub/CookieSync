@@ -7,7 +7,7 @@ from functools import cached_property
 from logging import getLogger
 from logging.handlers import MemoryHandler
 from threading import Thread
-from typing import Dict
+from typing import Dict, Tuple, Optional
 
 from resoserver.choices import Commands, Fields
 from resoserver.handlers import recv_data_or_none
@@ -28,6 +28,7 @@ class Server:
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+    MAX_CHUNK = 1024
     mem_handler = MemoryHandler(capacity=100, target=logging.StreamHandler())
     server_logger = getLogger('ResoServer')
     server_logger.addHandler(mem_handler)
@@ -91,15 +92,20 @@ class Server:
     #         output_json = json.dumps(output).encode('utf-8')
     #         client_socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
 
-    def _get_bytes_output(self, hsh, data):
-        if data.get(Fields.command) == Commands.create:
+    def _get_bytes_output(self,client_address: Tuple, hsh: str, json_data: Dict) -> Optional[bytes]:
+        command = json_data.get(Fields.command)
+        if not command:
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} no command found')
+            return None
+        self.server_logger.info(f'Command received: {command}')
+        if command == Commands.create:
             self._accounts[hsh] = self.cookie_sample
             self._commit(hsh)
             output = {
                 Fields.result: True,
                 Fields.message: 'Cookies was created successfully',
             }
-        elif data.get(Fields.command) == Commands.get_all:
+        elif command == Commands.get_all:
             output = {
                 Fields.result: True,
                 Fields.message: list(self._accounts.keys()),
@@ -109,20 +115,24 @@ class Server:
                 Fields.result: False,
                 Fields.message: 'Hash was not found in storage',
             }
-        elif data.get(Fields.command) == Commands.get:
+        elif command == Commands.get:
             output = {
                 Fields.result: True,
                 Fields.cookies: self._accounts[hsh],
             }
-        elif data.get(Fields.command) == Commands.set:
-            self._accounts[hsh] = data.get(Fields.cookies)
+        elif command == Commands.set:
+            cookies = json_data.get(Fields.cookies)
+            if not cookies:
+                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
+                return None
+            self._accounts[hsh] = json_data.get(Fields.cookies)
             self._commit(hsh)
             output = {
                 Fields.result: True,
                 Fields.message: 'Cookies was set successfully',
             }
             # self._send_cookies_to_clients(hsh)
-        elif data.get(Fields.command) == Commands.delete:
+        elif command == Commands.delete:
             self._accounts.pop(hsh)
             filename = f'{hsh}.json'
             full_path = os.path.join(self.ACCOUNTS_PATH, filename)
@@ -145,14 +155,22 @@ class Server:
             if not length_bytes:
                 break
             length = int.from_bytes(length_bytes, 'big')
+            if length > self.MAX_CHUNK:
+                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} loaded too many chunks')
+                break
             data = recv_data_or_none(client_socket, length)
             if not data:
                 break
-            data = json.loads(data.decode('utf-8'))
-            self.server_logger.info(f'Command received: {data.get(Fields.command)}')
-            hsh = data.get(Fields.hash)
+            try:
+                json_data = json.loads(data.decode('utf-8'))
+            except json.JSONDecodeError:
+                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} sent invalid JSON')
+                break
             # self._active_clients[hsh].add(client_socket)
-            bytes_output = self._get_bytes_output(hsh, data)
+            hsh = json_data.get(Fields.hash)
+            bytes_output = self._get_bytes_output(client_address, hsh, json_data)
+            if not bytes_output:
+                break
             client_socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
             self.server_logger.info(f'Response sent: {bytes_output}')
         client_socket.close()
