@@ -67,6 +67,7 @@ class Server:
             certfile=os.path.join(self.BASE_DIR, 'cert.pem'),
             keyfile=os.path.join(self.BASE_DIR, 'key.pem'),
         )
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.socket = context.wrap_socket(_socket, server_side=True)
 
     @cached_property
@@ -94,8 +95,9 @@ class Server:
             output_json = json.dumps(output).encode('utf-8')
             client_socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
 
-    def _get_bytes_output(self,client_address: Tuple, hsh: str, json_data: Dict) -> Optional[bytes]:
+    def _get_bytes_output(self, client_socket: socket.socket, hsh: str, json_data: Dict) -> Optional[bytes]:
         command = json_data.get(Fields.command)
+        client_address = client_socket.getpeername()
         if not command:
             self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} no command found')
             return None
@@ -123,6 +125,9 @@ class Server:
                 Fields.message: f'Client {client_address[0]}:{client_address[1]} registered successfully',
                 Fields.cookies: self._accounts[hsh],
             }
+            if not self._active_clients.get(hsh):
+                self._active_clients[hsh] = set()
+            self._active_clients[hsh].add(client_socket)
         elif command == Commands.get:
             output = {
                 Fields.result: True,
@@ -139,11 +144,11 @@ class Server:
                 Fields.result: True,
                 Fields.message: 'Cookies was set successfully',
             }
-            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} set {cookies}')
-            # self._send_cookies_to_clients(hsh)
+            self._send_cookies_to_clients(hsh, client_address)
         elif command == Commands.delete:
             self._accounts.pop(hsh)
-            self._active_clients.pop(hsh)
+            if self._active_clients.get(hsh):
+                self._active_clients.pop(hsh)
             filename = f'{hsh}.json'
             full_path = os.path.join(self.ACCOUNTS_PATH, filename)
             os.remove(full_path)
@@ -159,14 +164,22 @@ class Server:
         return json.dumps(output).encode('utf-8')
 
     def __get_json_data(self, client_socket, client_address) -> Optional[Dict]:
-        length_bytes = recv_data_or_none(client_socket, 4)
+        try:
+            length_bytes = recv_data_or_none(client_socket, 4)
+        except ssl.SSLError as e:
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} SSL error {e}')
+            return None
         if not length_bytes:
             return None
         length = int.from_bytes(length_bytes, 'big')
         if length > self.MAX_CHUNK:
             self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} loaded too many chunks')
             return None
-        data = recv_data_or_none(client_socket, length)
+        try:
+            data = recv_data_or_none(client_socket, length)
+        except ssl.SSLError as e:
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} SSL error {e}')
+            return None
         if not data:
             return None
         try:
@@ -179,22 +192,18 @@ class Server:
         self.server_logger.info(f'Client connected: {client_address[0]}:{client_address[1]}')
         hsh = None
         while True:
-            # self._active_clients[hsh].add(client_socket)
             # может быть строкой и нан
             json_data = self.__get_json_data(client_socket, client_address)
             if not json_data:
                 break
             hsh = json_data.get(Fields.hash)
-            if hsh:
-                if not self._active_clients.get(hsh):
-                    self._active_clients[hsh] = set()
-                self._active_clients[hsh].add(client_socket)
-            bytes_output = self._get_bytes_output(client_address, hsh, json_data)
+            bytes_output = self._get_bytes_output(client_socket, hsh, json_data)
             if not bytes_output:
                 break
             client_socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
             self.server_logger.info(f'Response sent: {bytes_output}')
         client_socket.close()
+        # может быть строкой и нан (если get_all)
         if hsh:
             if self._active_clients.get(hsh):
                 self._active_clients[hsh].remove(client_socket)

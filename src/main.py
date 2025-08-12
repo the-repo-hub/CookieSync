@@ -134,7 +134,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             super().__init__(service=self.service, options=self.options)
         except NoSuchDriverException:
             raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
-        self.need_to_set_telegram_cookies = True
+        self.need_to_set_telegram_cookies = False
         self.last_cookies = None
 
     def delete_reso_cookies(self) -> None:
@@ -220,7 +220,10 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self._run()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.manager.shutdown()
+        try:
+            self.manager.shutdown()
+        except OSError:
+            pass
         if exc_type:
             if issubclass(exc_type, InvalidSessionIdException):
                 return True

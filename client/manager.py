@@ -15,7 +15,14 @@ from src.exceptions import InvalidHash, CantConnectServer
 class Manager:
     def __init__(self, server_addr: str, server_port: int):
         _socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _socket.connect((server_addr, server_port))
+        except TimeoutError:
+            raise CantConnectServer
+        except ConnectionRefusedError:
+            raise CantConnectServer
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.check_hostname = False  # Отключаем проверку имени хоста
         context.verify_mode = ssl.CERT_NONE # Не проверяем сертификационный центр
         self._socket = context.wrap_socket(_socket, server_hostname=server_addr)
@@ -24,12 +31,6 @@ class Manager:
         self._receiver_is_running = False
         self.queue = queue.Queue()
         self.socket_event = threading.Event()
-        try:
-            self._socket.connect((server_addr, server_port))
-        except TimeoutError:
-            raise CantConnectServer
-        except ConnectionRefusedError:
-            raise CantConnectServer
 
     @retry(
         stop=stop_after_attempt(10),
@@ -82,6 +83,8 @@ class Manager:
             Fields.hash: hsh
         }
         data = self._send_output(output)
+        if data[Fields.result] is False:
+            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
         return data.get(Fields.cookies)
 
 class AdminManager(Manager):
