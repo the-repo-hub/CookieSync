@@ -7,7 +7,7 @@ from functools import cached_property
 from logging import getLogger
 from logging.handlers import MemoryHandler
 from threading import Thread
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Set
 
 from resoserver.choices import Commands, Fields
 from resoserver.handlers import recv_data_or_none
@@ -37,20 +37,20 @@ class Server:
         self.host = host
         self.port = port
         # {123456_test: {'aspnet': 'dfsdfssd'}}
-        self._accounts = {}
+        self._accounts: Dict[str, Dict] = {}
+        self._active_clients: Dict[str, Set[socket.socket]] = {}
         self._init_accounts()
         self.socket = None
         self._init_socket()
         self.server_logger.info(f'Server listening on {self.host}:{self.port}')
         # {123456_test: {clientSocket1, clientSocket2}}
-        # self._active_clients = {}
 
     def _init_accounts(self):
         for filename in os.listdir(self.ACCOUNTS_PATH):
             hsh = filename.split('.')[0]
             file = open(os.path.join(self.ACCOUNTS_PATH, filename))
             self._accounts[hsh] = json.loads(file.read())
-            # self._active_clients[hsh] = set()
+            self._active_clients[hsh] = set()
             file.close()
 
     def _init_socket(self):
@@ -83,14 +83,16 @@ class Server:
                 json.dumps(self._accounts[hsh])
             )
 
-    # def _send_cookies_to_clients(self, hsh):
-    #     for client_socket in self._active_clients[hsh]:
-    #         output = {
-    #             Fields.command: Commands.set,
-    #             Fields.cookies: self._accounts[hsh],
-    #         }
-    #         output_json = json.dumps(output).encode('utf-8')
-    #         client_socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
+    def _send_cookies_to_clients(self, hsh: str, client_address: Tuple):
+        for client_socket in self._active_clients[hsh]:
+            if client_socket.getpeername() == client_address:
+                continue
+            output = {
+                Fields.command: Commands.set,
+                Fields.cookies: self._accounts[hsh],
+            }
+            output_json = json.dumps(output).encode('utf-8')
+            client_socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
 
     def _get_bytes_output(self,client_address: Tuple, hsh: str, json_data: Dict) -> Optional[bytes]:
         command = json_data.get(Fields.command)
@@ -115,6 +117,12 @@ class Server:
                 Fields.result: False,
                 Fields.message: 'Hash was not found in storage',
             }
+        elif command == Commands.register:
+            output = {
+                Fields.result: True,
+                Fields.message: f'Client {client_address[0]}:{client_address[1]} registered successfully',
+                Fields.cookies: self._accounts[hsh],
+            }
         elif command == Commands.get:
             output = {
                 Fields.result: True,
@@ -134,6 +142,7 @@ class Server:
             # self._send_cookies_to_clients(hsh)
         elif command == Commands.delete:
             self._accounts.pop(hsh)
+            self._active_clients.pop(hsh)
             filename = f'{hsh}.json'
             full_path = os.path.join(self.ACCOUNTS_PATH, filename)
             os.remove(full_path)
@@ -150,6 +159,7 @@ class Server:
 
     def __handle_client(self, client_socket, client_address):
         self.server_logger.info(f'Client connected: {client_address[0]}:{client_address[1]}')
+        hsh = None
         while True:
             length_bytes = recv_data_or_none(client_socket, 4)
             if not length_bytes:
@@ -167,20 +177,30 @@ class Server:
                 self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} sent invalid JSON')
                 break
             # self._active_clients[hsh].add(client_socket)
+            # может быть строкой и нан
             hsh = json_data.get(Fields.hash)
+            if hsh:
+                if not self._active_clients.get(hsh):
+                    self._active_clients[hsh] = set()
+                self._active_clients[hsh].add(client_socket)
             bytes_output = self._get_bytes_output(client_address, hsh, json_data)
             if not bytes_output:
                 break
             client_socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
             self.server_logger.info(f'Response sent: {bytes_output}')
         client_socket.close()
-        # self._active_clients[hsh].pop(client_socket)
+        if hsh:
+            self._active_clients[hsh].remove(client_socket)
         self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} socket closed')
 
     def run(self):
         # каждое новое подключение (одно приложение)
         while True:
-            client_socket, client_address = self.socket.accept()
+            try:
+                client_socket, client_address = self.socket.accept()
+            except ssl.SSLEOFError:
+                # клиент сокет убит до того, как обменяться данными
+                continue
             Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
 
     def start(self):

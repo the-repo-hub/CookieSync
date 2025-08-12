@@ -1,6 +1,6 @@
 """Main file to run main functionality."""
-
 import os
+import threading
 import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
@@ -22,7 +22,7 @@ from client.manager import Manager
 from src.choiches import CookieFields
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
     BrowserNotFoundError, BrowserNotInstalled
-from src.handlers import exception_run_handler
+from src.handlers import selenium_exception_handler
 from src.settings import INI_PATH, SERVER_PORT, SERVER_ADDRESS
 
 BaseDriverMeta: Type = type(WebDriver)
@@ -134,7 +134,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             super().__init__(service=self.service, options=self.options)
         except NoSuchDriverException:
             raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
-        self.need_to_set_telegram_cookies = False
+        self.need_to_set_telegram_cookies = True
         self.last_cookies = None
 
     def delete_reso_cookies(self) -> None:
@@ -178,9 +178,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def logged_in(self) -> None:
         """Logic when browser is logged in service."""
-        cookies = self.manager.get_cookies(self.hash)
         browser_cookies = self.get_browser_cookies()
-
         if browser_cookies and self.need_to_set_telegram_cookies:
             # зашел текущий клиент, у него теперь другие куки и нужно поменять в телеге
             self.manager.set_cookies(cookies=browser_cookies, hsh=self.hash)
@@ -190,43 +188,39 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             # я залогинен, но ресо сервер изменил мне куки
             self.manager.set_cookies(cookies=browser_cookies, hsh=self.hash)
             self.last_cookies = browser_cookies
-        elif browser_cookies != cookies:
-            # другой клиент изменил кукисы на свои, рабочие, но при этом я тоже залогинен, так что нужно унифицировать
-            self.insert_cookies(cookies)
-            self.last_cookies = cookies
 
-    def logged_out(self) -> None:
-        """Logic, when browser is logged out from service."""
-        cookies = self.manager.get_cookies(self.hash)
-        if self.last_cookies == cookies:
-            # в телеге лежат неверные куки, которые я пытался использовать
-            self.need_to_set_telegram_cookies = True
-        else:
-            # кто-то изменил куки и они рабочие с высокой вероятностью
-            self.need_to_set_telegram_cookies = False
-            self.insert_cookies(cookies)
-            self.get(self.url_main)
+    def update_cookies(self) -> None:
+        cookies = self.manager.queue.get()
+        self.insert_cookies(cookies)
+        self.last_cookies = cookies
+        self.manager.socket_event.clear()
+        self.need_to_set_telegram_cookies = False
+        self.get(self.url_main)
 
-    @exception_run_handler
     def _run(self) -> None:
         """Run main logic."""
-        # if it will be removed, don't forget about implicitly wait
         while self.session_id:
-            if self.auth_complete():
+            if self.manager.socket_event.is_set():
+                # единственное условие срабатывания - сервер прислал рабочие куки
+                self.update_cookies()
+            elif self.auth_complete():
                 self.logged_in()
             else:
-                self.logged_out()
+                # если нас выкинет во время работы, то нужно использовать эту переменную снова
+                self.need_to_set_telegram_cookies = True
             time.sleep(1)
 
+    @selenium_exception_handler
     def start(self):
         self.last_cookies = self.manager.get_cookies(self.hash)
         self.get(self.url_main)
         self.insert_cookies(self.last_cookies)
         self.get(self.url_main)
+        threading.Thread(target=self.manager.start_cookies_receiver, args=(self.hash,)).start()
         self._run()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.manager.close()
+        self.manager.shutdown()
         if issubclass(exc_type, InvalidSessionIdException):
             return True
         raise exc_type(exc_val)

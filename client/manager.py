@@ -1,25 +1,29 @@
 import json
+import queue
 import socket
+import ssl
+import threading
 from typing import Dict, List
 
 from tenacity import retry, stop_after_attempt, retry_if_not_exception_type, wait_fixed
 
 from resoserver.choices import Fields, Commands
-from resoserver.handlers import recv_data_or_none
+from client.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
-import ssl
 
-class Manager(object):
 
+class Manager:
     def __init__(self, server_addr: str, server_port: int):
         _socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _socket.settimeout(10)
         context = ssl.create_default_context()
         context.check_hostname = False  # Отключаем проверку имени хоста
         context.verify_mode = ssl.CERT_NONE # Не проверяем сертификационный центр
         self._socket = context.wrap_socket(_socket, server_hostname=server_addr)
         self.server_addr = server_addr
         self.server_port = server_port
+        self._receiver_is_running = False
+        self.queue = queue.Queue()
+        self.socket_event = threading.Event()
         try:
             self._socket.connect((server_addr, server_port))
         except TimeoutError:
@@ -43,8 +47,42 @@ class Manager(object):
         data = json.loads(data.decode())
         return data
 
-    def close(self):
+    def shutdown(self):
+        self._socket.shutdown(socket.SHUT_RDWR)
         self._socket.close()
+
+    def set_cookies(self, cookies: List, hsh: str) -> None:
+        output = {
+            Fields.command: Commands.set,
+            Fields.hash: hsh,
+            Fields.cookies: cookies,
+        }
+        result = self._send_output(output)
+        if result[Fields.result] is False:
+            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
+
+    def start_cookies_receiver(self, hsh):
+        self._register(hsh)
+        self._receiver_is_running = True
+        while self._receiver_is_running:
+            # блокирующая операция
+            length = int.from_bytes(recv_data_or_none(self._socket, 4), 'big')
+            if not length:
+                raise CantConnectServer
+            if length > 1024:
+                continue
+            # блокирующая операция
+            data = recv_data_or_none(self._socket, length)
+            data = json.loads(data.decode())
+            self.queue.put(data.get(Fields.cookies))
+            self.socket_event.set()
+
+    def _register(self, hsh) -> None:
+        output = {
+            Fields.command: Commands.register,
+            Fields.hash: hsh
+        }
+        self._send_output(output)
 
     def get_cookies(self, hsh: str) -> List[Dict]:
         output = {
@@ -56,15 +94,8 @@ class Manager(object):
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
         return result.get(Fields.cookies)
 
-    def set_cookies(self, cookies: List, hsh: str) -> None:
-        output = {
-            Fields.command: Commands.set,
-            Fields.hash: hsh,
-            Fields.cookies: cookies,
-        }
-        result = self._send_output(output)
-        if result[Fields.result] is False:
-            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
+
+class ManagerForConsole(Manager):
 
     def add_account(self, hsh: str) -> None:
         output = {

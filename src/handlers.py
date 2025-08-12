@@ -9,7 +9,7 @@ from selenium.common.exceptions import (
 from selenium.webdriver.remote.webdriver import WebDriver
 
 
-def exception_run_handler(fn: Callable) -> Callable:
+def selenium_exception_handler(fn: Callable) -> Callable:
     """Run function exception handler that.
 
     Args:
