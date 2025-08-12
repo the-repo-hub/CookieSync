@@ -1,11 +1,6 @@
 run:
-	python reso_auto/main.py
-
-lint:
-	poetry run flake8 reso_auto
-
-mypy:
-	poetry run mypy reso_auto
-
+	python -m src.main
+run_server:
+	python -m resoserver.start
 test:
 	python -m unittest

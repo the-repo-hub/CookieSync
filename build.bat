@@ -6,7 +6,7 @@ if not exist ".venv\" (
     echo Creating virtual environment...
     python -m venv .venv
     call .venv\Scripts\activate.bat
-    pip install -r requirements.txt
+    pip install -r src\requirements.txt
     pip install pyinstaller
 ) else (
     echo Virtual environment already exists, pass this step.

@@ -61,8 +61,7 @@ class Manager:
         if result[Fields.result] is False:
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
 
-    def start_cookies_receiver(self, hsh):
-        self._register(hsh)
+    def start_cookies_receiver(self):
         self._receiver_is_running = True
         while self._receiver_is_running:
             # блокирующая операция
@@ -77,12 +76,15 @@ class Manager:
             self.queue.put(data.get(Fields.cookies))
             self.socket_event.set()
 
-    def _register(self, hsh) -> None:
+    def register(self, hsh) -> List[Dict]:
         output = {
             Fields.command: Commands.register,
             Fields.hash: hsh
         }
-        self._send_output(output)
+        data = self._send_output(output)
+        return data.get(Fields.cookies)
+
+class AdminManager(Manager):
 
     def get_cookies(self, hsh: str) -> List[Dict]:
         output = {
@@ -93,9 +95,6 @@ class Manager:
         if result[Fields.result] is False:
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
         return result.get(Fields.cookies)
-
-
-class ManagerForConsole(Manager):
 
     def add_account(self, hsh: str) -> None:
         output = {

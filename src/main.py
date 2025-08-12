@@ -212,18 +212,21 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     @selenium_exception_handler
     def start(self):
-        self.last_cookies = self.manager.get_cookies(self.hash)
+        self.last_cookies = self.manager.register(self.hash)
         self.get(self.url_main)
         self.insert_cookies(self.last_cookies)
+        threading.Thread(target=self.manager.start_cookies_receiver).start()
         self.get(self.url_main)
-        threading.Thread(target=self.manager.start_cookies_receiver, args=(self.hash,)).start()
         self._run()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.manager.shutdown()
-        if issubclass(exc_type, InvalidSessionIdException):
-            return True
-        raise exc_type(exc_val)
+        if exc_type:
+            if issubclass(exc_type, InvalidSessionIdException):
+                return True
+            raise exc_type(exc_val)
+        return False
+
 
 if __name__ == '__main__':
     with ResoBrowser() as driver:

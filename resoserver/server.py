@@ -190,7 +190,8 @@ class Server:
             self.server_logger.info(f'Response sent: {bytes_output}')
         client_socket.close()
         if hsh:
-            self._active_clients[hsh].remove(client_socket)
+            if self._active_clients.get(hsh):
+                self._active_clients[hsh].remove(client_socket)
         self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} socket closed')
 
     def run(self):

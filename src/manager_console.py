@@ -2,14 +2,14 @@
 
 from typing import List
 
-from client.manager import ManagerForConsole
+from client.manager import AdminManager
 from src.settings import SERVER_ADDRESS, SERVER_PORT
 
 
 class Console(object):
     """Pinned message console class."""
 
-    manager = ManagerForConsole(SERVER_ADDRESS, SERVER_PORT)
+    manager = AdminManager(SERVER_ADDRESS, SERVER_PORT)
     accounts: List
 
     def command_handler(self, command: str) -> None:
