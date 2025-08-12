@@ -139,6 +139,7 @@ class Server:
                 Fields.result: True,
                 Fields.message: 'Cookies was set successfully',
             }
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} set {cookies}')
             # self._send_cookies_to_clients(hsh)
         elif command == Commands.delete:
             self._accounts.pop(hsh)
@@ -157,27 +158,32 @@ class Server:
             }
         return json.dumps(output).encode('utf-8')
 
+    def __get_json_data(self, client_socket, client_address) -> Optional[Dict]:
+        length_bytes = recv_data_or_none(client_socket, 4)
+        if not length_bytes:
+            return None
+        length = int.from_bytes(length_bytes, 'big')
+        if length > self.MAX_CHUNK:
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} loaded too many chunks')
+            return None
+        data = recv_data_or_none(client_socket, length)
+        if not data:
+            return None
+        try:
+            return json.loads(data.decode('utf-8'))
+        except json.JSONDecodeError:
+            self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} sent invalid JSON')
+            return None
+
     def __handle_client(self, client_socket, client_address):
         self.server_logger.info(f'Client connected: {client_address[0]}:{client_address[1]}')
         hsh = None
         while True:
-            length_bytes = recv_data_or_none(client_socket, 4)
-            if not length_bytes:
-                break
-            length = int.from_bytes(length_bytes, 'big')
-            if length > self.MAX_CHUNK:
-                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} loaded too many chunks')
-                break
-            data = recv_data_or_none(client_socket, length)
-            if not data:
-                break
-            try:
-                json_data = json.loads(data.decode('utf-8'))
-            except json.JSONDecodeError:
-                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} sent invalid JSON')
-                break
             # self._active_clients[hsh].add(client_socket)
             # может быть строкой и нан
+            json_data = self.__get_json_data(client_socket, client_address)
+            if not json_data:
+                break
             hsh = json_data.get(Fields.hash)
             if hsh:
                 if not self._active_clients.get(hsh):
@@ -201,6 +207,22 @@ class Server:
                 client_socket, client_address = self.socket.accept()
             except ssl.SSLEOFError:
                 # клиент сокет убит до того, как обменяться данными
+                self.server_logger.error('Client disconnected before key sharing')
+                continue
+            except ssl.SSLZeroReturnError:
+                # nmap
+                self.server_logger.error('Cant establish SSL connection')
+                continue
+            except ssl.SSLError:
+                self.server_logger.error('Unknown SSL error')
+                #прочее
+                continue
+            except ConnectionResetError:
+                # nmap
+                self.server_logger.error('Connection reset by peer')
+                continue
+            except Exception as e:
+                self.server_logger.error(f'Unknown exception: {e}')
                 continue
             Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
 
