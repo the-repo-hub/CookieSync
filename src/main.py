@@ -224,8 +224,12 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             self.manager.shutdown()
         except OSError:
             pass
+        self.quit()
         if exc_type:
             if issubclass(exc_type, InvalidSessionIdException):
+                return True
+            if issubclass(exc_type, IndexError):
+                # driver.switch_to.window fails during closing
                 return True
             raise exc_type(exc_val)
         return False
