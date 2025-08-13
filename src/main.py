@@ -227,6 +227,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.manager.close()
+        self.quit()
         if issubclass(exc_type, InvalidSessionIdException):
             return True
         raise exc_type(exc_val)
