@@ -122,7 +122,7 @@ class Server:
                 Fields.cookies: self._accounts[hsh],
             }
         elif command == Commands.set:
-            if self.time is None or self.time - time.time() > 60:
+            if self.time is None or time.time() - self.time > 60:
                 self.time = time.time()
                 cookies = json_data.get(Fields.cookies)
                 if not cookies:
