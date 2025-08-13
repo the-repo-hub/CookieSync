@@ -1,5 +1,4 @@
 """Test module for ResoAuto."""
-import os
 import unittest
 from threading import Thread
 
@@ -9,8 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from client.manager import Manager
 from src.main import ResoBrowser
-from src.settings import SERVER_ADDRESS, SERVER_PORT, INI_PATH
-
+from src.settings import SERVER_ADDRESS, SERVER_PORT
 
 
 class ResoTestCase(unittest.TestCase):
@@ -27,7 +25,7 @@ class ResoTestCase(unittest.TestCase):
     def test_manager_start(self) -> None:
         """Test availability of pinned message."""
         cookies = self.manager.get_cookies(self.test_hash)
-        self.assertEqual(len(cookies), 2)
+        self.assertEqual(len(cookies.as_lst()), 2)
 
     def test_accounts_managing(self) -> None:
         """Test add and remove account methods."""
@@ -36,7 +34,7 @@ class ResoTestCase(unittest.TestCase):
         # self.assertEqual(len(cookies), 2)
         self.manager.add_account(self.test_hash)
         cookies = self.manager.get_cookies(self.test_hash)
-        self.assertEqual(len(cookies), 2)
+        self.assertEqual(len(cookies.as_lst()), 2)
 
     def test_launch(self) -> None:
         """Test browser application launch."""
