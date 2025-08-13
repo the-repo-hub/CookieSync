@@ -4,9 +4,9 @@ import os
 import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
-from typing import Any, Dict, List, Tuple, Type, Optional
+from typing import Any, Dict, Tuple, Type, Optional
 
-from selenium.common.exceptions import InvalidSessionIdException
+from selenium.common.exceptions import InvalidSessionIdException, InvalidCookieDomainException
 from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
@@ -20,12 +20,14 @@ from selenium.webdriver.remote.webdriver import WebDriver
 
 from client.manager import Manager
 from src.choiches import CookieFields
+from src.cookies import Cookies
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
     BrowserNotFoundError, BrowserNotInstalled
 from src.handlers import exception_run_handler
 from src.settings import INI_PATH, SERVER_PORT, SERVER_ADDRESS
 
 BaseDriverMeta: Type = type(WebDriver)
+
 
 class BrowserDetector(object):
     """Detect browser class and his services and options."""
@@ -144,10 +146,10 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self.delete_cookie(CookieFields.aspnet)
         self.delete_cookie(CookieFields.reso_office60)
 
-    def insert_cookies(self, tele_cookies: List) -> None:
+    def insert_cookies(self, cookies: Cookies) -> None:
         """Get cookies from telegram and insert them in browser."""
         self.delete_reso_cookies()
-        for line in tele_cookies:
+        for line in cookies.as_lst():
             self.add_cookie(line)
 
     def auth_complete(self) -> bool:
@@ -163,7 +165,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             return True
         return False
 
-    def get_browser_cookies(self) -> Optional[List]:
+    def get_browser_cookies(self) -> Optional[Cookies]:
         """Get cookies from browser.
 
         Returns:
@@ -175,7 +177,7 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         ]
         #иногда сетится null, чтобы избежать этого:
         if all(cookies):
-            return cookies
+            return Cookies(cookies)
         return None
 
     def logged_in(self) -> None:
@@ -236,6 +238,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         if exc_type:
             if issubclass(exc_type, InvalidSessionIdException):
                 # закрыт браузер при свитче
+                return True
+            if issubclass(exc_type, InvalidCookieDomainException):
+                # ошибка при интерпретации кукисов (невалидные, но показывает, что валидные)
                 return True
             raise exc_type(exc_val)
         return False

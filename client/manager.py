@@ -7,6 +7,7 @@ from tenacity import retry, stop_after_attempt, retry_if_not_exception_type, wai
 from resoserver.choices import Fields, Commands
 from resoserver.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
+from src.cookies import Cookies
 import ssl
 
 class Manager(object):
@@ -47,7 +48,7 @@ class Manager(object):
         self._socket.shutdown(socket.SHUT_RDWR)
         self._socket.close()
 
-    def get_cookies(self, hsh: str) -> List[Dict]:
+    def get_cookies(self, hsh: str) -> Cookies:
         output = {
             Fields.command: Commands.get,
             Fields.hash: hsh,
@@ -55,13 +56,13 @@ class Manager(object):
         result = self._send_output(output)
         if result[Fields.result] is False:
             raise InvalidHash(InvalidHash.msg.format(hash=hsh))
-        return result.get(Fields.cookies)
+        return Cookies(result.get(Fields.cookies))
 
-    def set_cookies(self, cookies: List, hsh: str) -> None:
+    def set_cookies(self, cookies: Cookies, hsh: str) -> None:
         output = {
             Fields.command: Commands.set,
             Fields.hash: hsh,
-            Fields.cookies: cookies,
+            Fields.cookies: cookies.as_lst(),
         }
         self._send_output(output)
 
