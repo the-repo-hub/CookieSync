@@ -121,19 +121,24 @@ class Server:
                 Fields.result: True,
                 Fields.cookies: self._accounts[hsh],
             }
-        elif command == Commands.set and (self.time is None or self.time - time.time() > 60):
-            self.time = time.time()
-            cookies = json_data.get(Fields.cookies)
-            if not cookies:
-                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
-                return None
-            self._accounts[hsh] = json_data.get(Fields.cookies)
-            self._commit(hsh)
-            output = {
-                Fields.result: True,
-                Fields.message: 'Cookies was set successfully',
-            }
-            # self._send_cookies_to_clients(hsh)
+        elif command == Commands.set:
+            if self.time is None or self.time - time.time() > 60:
+                self.time = time.time()
+                cookies = json_data.get(Fields.cookies)
+                if not cookies:
+                    self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
+                    return None
+                self._accounts[hsh] = json_data.get(Fields.cookies)
+                self._commit(hsh)
+                output = {
+                    Fields.result: True,
+                    Fields.message: 'Cookies was set successfully',
+                }
+            else:
+                output = {
+                    Fields.result: False,
+                    Fields.message: "Cookies already set by another client",
+                }
         elif command == Commands.delete:
             self._accounts.pop(hsh)
             filename = f'{hsh}.json'

@@ -63,9 +63,7 @@ class Manager(object):
             Fields.hash: hsh,
             Fields.cookies: cookies,
         }
-        result = self._send_output(output)
-        if result[Fields.result] is False:
-            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
+        self._send_output(output)
 
     def add_account(self, hsh: str) -> None:
         output = {
