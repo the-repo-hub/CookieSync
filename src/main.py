@@ -127,15 +127,17 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     options: FirefoxOptions
     browser_name: str #capitalized
 
-    def __init__(self) -> None:
+    def __init__(self, hsh=None) -> None:
         """Initialize method for class."""
         #browser in ini file is correct, but not installed in system
+        if hsh:
+            self.hash = hsh
+        self.last_cookies = self.manager.get_cookies(self.hash)
         try:
             super().__init__(service=self.service, options=self.options)
         except NoSuchDriverException:
             raise BrowserNotInstalled(f'Браузер {self.browser_name} не установлен в системе')
         self.need_to_set_telegram_cookies = False
-        self.last_cookies = None
 
     def delete_reso_cookies(self) -> None:
         """Delete only necessary reso cookies."""
@@ -219,7 +221,6 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             time.sleep(1)
 
     def start(self):
-        self.last_cookies = self.manager.get_cookies(self.hash)
         self.get(self.url_main)
         self.insert_cookies(self.last_cookies)
         self.get(self.url_main)
@@ -228,9 +229,11 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.manager.close()
         self.quit()
-        if issubclass(exc_type, InvalidSessionIdException):
-            return True
-        raise exc_type(exc_val)
+        if exc_type:
+            if issubclass(exc_type, InvalidSessionIdException):
+                return True
+            raise exc_type(exc_val)
+        return False
 
 if __name__ == '__main__':
     with ResoBrowser() as driver:

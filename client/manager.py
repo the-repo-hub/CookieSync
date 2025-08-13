@@ -44,6 +44,7 @@ class Manager(object):
         return data
 
     def close(self):
+        self._socket.shutdown(socket.SHUT_RDWR)
         self._socket.close()
 
     def get_cookies(self, hsh: str) -> List[Dict]:

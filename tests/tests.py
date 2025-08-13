@@ -1,5 +1,5 @@
 """Test module for ResoAuto."""
-
+import os
 import unittest
 from threading import Thread
 
@@ -9,7 +9,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from client.manager import Manager
 from src.main import ResoBrowser
-from src.settings import SERVER_ADDRESS, SERVER_PORT
+from src.settings import SERVER_ADDRESS, SERVER_PORT, INI_PATH
+
 
 
 class ResoTestCase(unittest.TestCase):
@@ -40,7 +41,7 @@ class ResoTestCase(unittest.TestCase):
     def test_launch(self) -> None:
         """Test browser application launch."""
         self.assertTrue(self.manager.get_cookies(self.test_hash))
-        with ResoBrowser() as browser:
+        with ResoBrowser(self.test_hash) as browser:
             browser.hash = self.test_hash
             thread = Thread(target=browser.start)
             thread.start()
@@ -49,6 +50,8 @@ class ResoTestCase(unittest.TestCase):
                     (By.XPATH, '/html/body/form/div[4]/div[1]/div[7]/div/div/div/div/div[1]'),
                 ),
             )
+            # эмулируем закрытие браузера пользователем (нужно, чтобы остановился вечный цикл)
+            browser.session_id = None
 
     @classmethod
     def tearDownClass(cls) -> None:
