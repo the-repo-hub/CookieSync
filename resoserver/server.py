@@ -11,7 +11,7 @@ from typing import Dict, Tuple, Optional
 
 from resoserver.choices import Commands, Fields
 from resoserver.handlers import recv_data_or_none
-
+import time
 # то, что приходит
 # {
 #     'command': 'set',
@@ -41,6 +41,7 @@ class Server:
         self._init_accounts()
         self.socket = None
         self._init_socket()
+        self.time = time.time()
         self.server_logger.info(f'Server listening on {self.host}:{self.port}')
         # {123456_test: {clientSocket1, clientSocket2}}
         # self._active_clients = {}
@@ -120,7 +121,8 @@ class Server:
                 Fields.result: True,
                 Fields.cookies: self._accounts[hsh],
             }
-        elif command == Commands.set:
+        elif command == Commands.set and self.time - time.time() < 60:
+            self.time = time.time()
             cookies = json_data.get(Fields.cookies)
             if not cookies:
                 self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
