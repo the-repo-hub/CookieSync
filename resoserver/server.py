@@ -11,7 +11,8 @@ from typing import Dict, Tuple, Optional
 
 from resoserver.choices import Commands, Fields
 from resoserver.handlers import recv_data_or_none
-import time
+
+
 # то, что приходит
 # {
 #     'command': 'set',
@@ -41,7 +42,7 @@ class Server:
         self._init_accounts()
         self.socket = None
         self._init_socket()
-        self.time = None
+        self._running = True
         self.server_logger.info(f'Server listening on {self.host}:{self.port}')
         # {123456_test: {clientSocket1, clientSocket2}}
         # self._active_clients = {}
@@ -122,22 +123,24 @@ class Server:
                 Fields.cookies: self._accounts[hsh],
             }
         elif command == Commands.set:
-            if self.time is None or time.time() - self.time > 60:
-                self.time = time.time()
-                cookies = json_data.get(Fields.cookies)
-                if not cookies:
-                    self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
-                    return None
-                self._accounts[hsh] = json_data.get(Fields.cookies)
+            cookies = json_data.get(Fields.cookies)
+            if not cookies:
+                self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} cookies not found')
+                output = {
+                    Fields.result: False,
+                    Fields.message: 'Cookies was not found in request',
+                }
+            elif self._accounts[hsh] == cookies:
+                output = {
+                    Fields.result: False,
+                    Fields.message: 'Cookies was set by other client',
+                }
+            else:
+                self._accounts[hsh] = cookies
                 self._commit(hsh)
                 output = {
                     Fields.result: True,
                     Fields.message: 'Cookies was set successfully',
-                }
-            else:
-                output = {
-                    Fields.result: False,
-                    Fields.message: "Cookies already set by another client",
                 }
         elif command == Commands.delete:
             self._accounts.pop(hsh)
@@ -184,17 +187,20 @@ class Server:
         # self._active_clients[hsh].pop(client_socket)
         self.server_logger.info(f'Client {client_address[0]}:{client_address[1]} socket closed')
 
-    def run(self):
-        # каждое новое подключение (одно приложение)
-        while True:
-            client_socket, client_address = self.socket.accept()
-            Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
-
     def start(self):
-        try:
-            self.run()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.server_logger.info('Server shutting down...')
-            self.socket.close()
+        # каждое новое подключение (одно приложение)
+        self._running = True
+        while self._running:
+            try:
+                client_socket, client_address = self.socket.accept()
+            except KeyboardInterrupt:
+                self.shutdown()
+            else:
+                Thread(target=self.__handle_client, args=(client_socket, client_address), daemon=True).start()
+
+    def shutdown(self):
+        self._running = False
+        self.server_logger.info('Server is shutting down...')
+        self.socket.shutdown(socket.SHUT_RDWR)
+        self.socket.close()
+        self.server_logger.info('Server stopped')
