@@ -227,10 +227,15 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
         self._run()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.manager.close()
+        try:
+            self.manager.close()
+        except OSError:
+            # упал сервер, а потом закрыли браузер
+            pass
         self.quit()
         if exc_type:
             if issubclass(exc_type, InvalidSessionIdException):
+                # закрыт браузер при свитче
                 return True
             raise exc_type(exc_val)
         return False
