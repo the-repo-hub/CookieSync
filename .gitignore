@@ -7,3 +7,5 @@
 /tests/.pytest_cache/
 /tests/geckodriver.log
 /.env
+/support_pinned/.env
+/support_pinned/cookies_sample.json

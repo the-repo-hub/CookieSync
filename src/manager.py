@@ -9,8 +9,8 @@ from telebot.apihelper import ApiTelegramException
 
 from src.exceptions import InvalidBotToken, InvalidHash, MessageTooLong
 from src.handlers import retry
-from src.settings import BOT_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT
-
+from src.settings import BOT_TOKEN, CHAT_ID, TELEGRAM_MSG_LIMIT, BASE_DIR
+import os
 
 class MessageManager(object):
     """Account manager class for manage pinned message data."""
@@ -22,8 +22,8 @@ class MessageManager(object):
             Returns:
                 JSON message sample.
             """
-        # ничего страшного, что это хранится в гит - эти значения генерируются каждый раз заново
-        return json.loads('{"test":[{"name":"ASP.NET_SessionId","value":"yrtu1tgknmxnjpeswaygtxqw","path":"/","secure":false,"httpOnly":true,"sameSite":"None","domain":".reso.ru"},{"name":"ResoOffice60","value":"3BDDB47353A1DBFBC4AE88C9659B35F136FEAB9E3F00A7E9F0FB21ADAC89E66B05F3D8E06052F6AF30C5B7628B4610979B604C5DB4046828B1B8658C7657F8AE45D53DE18201013C1492F10EE56F1469575D2D89","path":"/","secure":false,"httpOnly":true,"sameSite":"None","domain":".reso.ru"}]}')
+        with open(os.path.join(BASE_DIR, 'cookies_sample.json')) as f:
+            return json.loads(f.read())
 
     def __init__(self) -> None:
         """Account manager initial method."""

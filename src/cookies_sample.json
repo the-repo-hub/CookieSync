@@ -1,0 +1,22 @@
+{
+  "test": [
+    {
+      "name": "ASP.NET_SessionId",
+      "value": "yrtu1tgknmxnjpeswaygtxqw",
+      "path": "/",
+      "secure": false,
+      "httpOnly": true,
+      "sameSite": "None",
+      "domain": ".reso.ru"
+    },
+    {
+      "name": "ResoOffice60",
+      "value": "3BDDB47353A1DBFBC4AE88C9659B35F136FEAB9E3F00A7E9F0FB21ADAC89E66B05F3D8E06052F6AF30C5B7628B4610979B604C5DB4046828B1B8658C7657F8AE45D53DE18201013C1492F10EE56F1469575D2D89",
+      "path": "/",
+      "secure": false,
+      "httpOnly": true,
+      "sameSite": "None",
+      "domain": ".reso.ru"
+    }
+  ]
+}

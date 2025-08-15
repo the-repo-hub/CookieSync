@@ -1,0 +1,2 @@
+pytelegrambotapi~=4.27.0
+dotenv~=0.9.9
