@@ -5,8 +5,8 @@ import time
 from configparser import ConfigParser, SectionProxy
 from os import devnull
 from typing import Any, Dict, List, Tuple, Type, Optional
-
-from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException
+from http.client import RemoteDisconnected
+from selenium.common.exceptions import NoSuchElementException, NoSuchDriverException, InvalidSessionIdException, InvalidCookieDomainException
 from selenium.webdriver import Chrome, Edge, Firefox
 from selenium.webdriver.chrome.options import ChromiumOptions as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -219,6 +219,21 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
             else:
                 self.logged_out()
             time.sleep(1)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.quit()
+        if exc_type:
+            if issubclass(exc_type, InvalidSessionIdException):
+                # закрыт браузер при свитче
+                return True
+            if issubclass(exc_type, InvalidCookieDomainException):
+                # ошибка при интерпретации кукисов (невалидные, но показывает, что валидные)
+                return True
+            if issubclass(exc_type, RemoteDisconnected):
+                # быстро закрыть браузер
+                return True
+            raise exc_type(exc_val)
+        return False
 
 
 if __name__ == '__main__':

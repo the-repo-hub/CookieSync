@@ -87,33 +87,14 @@ def exception_run_handler(fn: Callable) -> Callable:
             try:
                 return fn(driver, *args, **kwargs)
             except NoSuchWindowException:
-                # raises if first tab was closed
-                try:
-                    driver.switch_to.window(driver.window_handles[0])
-                except InvalidSessionIdException:
-                    driver.quit()
-                    exit(0)
+                driver.switch_to.window(driver.window_handles[0])
             except UnexpectedAlertPresentException:
                 # raises if browser had js alert
                 pass
             except InvalidCookieDomainException:
                 # raises if cookie adding attempt fails, for example, if self.get hasn't called
                 pass
-            except InvalidSessionIdException:
-                exit(0)
-            except IndexError:
-                driver.quit()
-                break
-            except WebDriverException:
-                driver.quit()
-                break
-            except MaxRetryError:
-                break
-            # если закрыть браузер при выполнении второго гет запроса
-            except RemoteDisconnected:
-                break
             time.sleep(1)
-        exit(0)
     return inner
 
 
