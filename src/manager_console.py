@@ -2,19 +2,18 @@
 
 import json
 from http import HTTPStatus
-from random import getrandbits
 from typing import List
 
 from telebot.apihelper import ApiTelegramException
 
-from src.manager import MessageManager
 from src.exceptions import MessageTooLong
+from src.manager import MessageManager
+
 
 class Console(object):
     """Pinned message console class."""
 
     manager = MessageManager()
-    bits = 128
     accounts: List
 
     @classmethod
@@ -25,15 +24,14 @@ class Console(object):
             command: stringified num of option
         """
         if command == '1':
-            name = input('Имя, которое будет добавлено к хэшу (можно оставить пустым): ')
-            hsh = '{hash}_{name}'.format(hash=str(getrandbits(cls.bits)), name=name)
+            name = input('Название аккаунта: ')
             try:
-                cls.manager.add_account(hsh)
+                cls.manager.add_account(name)
             except MessageTooLong:
                 print(MessageTooLong.msg)
             else:
-                print('Новый хэш: {hsh}'.format(hsh=hsh), end='\n\n')
-                cls.accounts.append(hsh)
+                print('Новый аккаунт: {hsh}'.format(hsh=name), end='\n\n')
+                cls.accounts.append(name)
 
         elif command == '2':
             num = int(input('Номер хэша, который необходимо удалить: ')) - 1
