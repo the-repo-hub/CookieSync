@@ -1,0 +1,166 @@
+import json
+from abc import ABC, abstractmethod
+from typing import Dict, List
+
+from cookieserver.src.choices import Commands, Fields
+from cookieserver.src.client import Client, NoHashException
+from cookieserver.src.storage import CookieStorage, SetCookiesTimeoutError, AccountNotInStorageError
+from cookieserver.src.settings import SERVER_LOGGER, ENCODING
+
+
+class Command(ABC):
+
+    @abstractmethod
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        pass
+
+class GetAllAccountsCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        SERVER_LOGGER.info(f'Client {client.full_address} got all accounts')
+        return {
+            Fields.result: True,
+            Fields.message: storage.get_all_accounts(),
+        }
+
+class CreateCookiesCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        if not client.hash:
+            SERVER_LOGGER.info(f'Client {client.full_address} does not sent a {Fields.hash}')
+            return {
+                Fields.result: False,
+                Fields.message: f'You must send {Fields.hash}',
+            }
+        storage.add_account(client.hash)
+        SERVER_LOGGER.info(f'Client {client.full_address} has created a {client.hash} account')
+        return {
+            Fields.result: True,
+            Fields.message: 'Cookies was created successfully',
+        }
+
+class RegisterCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        try:
+            client.register()
+        except NoHashException:
+            SERVER_LOGGER.info(
+                f'Client {client.full_address} unsuccessfully executed {Commands.register} command. {Fields.hash} not found.',
+            )
+            return {
+                Fields.result: False,
+                Fields.message: f'You must send {Fields.hash}',
+            }
+        SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.register} command')
+        return {
+            Fields.result: True,
+            Fields.message: f'You was successfully registered for cookie dispatching',
+        }
+
+class DeleteCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        if not client.hash:
+            SERVER_LOGGER.info(f'Client {client.full_address} does not sent hash')
+            result = {
+                Fields.result: False,
+                Fields.message: f'You must send {Fields.hash}',
+            }
+            return result
+        try:
+            storage.remove_account(client.hash)
+        except AccountNotInStorageError:
+            SERVER_LOGGER.info(f'Client {client.full_address} account {client.hash} not found in storage')
+            return {
+                Fields.result: False,
+                Fields.message: f'Storage account {client.hash} was not found, so no account was removed',
+            }
+        client.unregister()
+        SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.delete} command. Cookies {client.hash} removed')
+        result = {
+            Fields.result: True,
+            Fields.message: f'Account {client.hash} was removed successfully',
+        }
+        return result
+
+class SetCookiesCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        if not client.hash:
+            SERVER_LOGGER.info(f'Client {client.full_address} does not sent hash')
+            return {
+                Fields.result: False,
+                Fields.message: f'You should send {Fields.hash}',
+            }
+        if not client.registered:
+            SERVER_LOGGER.info(f'Client {client.full_address} was not registered, so cookies cannot be set')
+            return {
+                Fields.result: False,
+                Fields.message: f'You should send {Commands.register} command first',
+            }
+        cookies = json_data.get(Fields.cookies)
+        if not cookies:
+            SERVER_LOGGER.info(f'Client {client.full_address} does not sent cookies')
+            return {
+                Fields.result: False,
+                Fields.message: f'You should send {Fields.cookies} data',
+            }
+        try:
+            storage.set_cookies(client.hash, cookies)
+        except SetCookiesTimeoutError:
+            SERVER_LOGGER.info(f'Client {client.full_address} tried to set new cookies, but they was already set successfully by other client')
+            return {
+                Fields.result: False,
+                Fields.message: 'Cookies was already set successfully',
+            }
+        except AccountNotInStorageError:
+            SERVER_LOGGER.info(f'Client {client.full_address} tried to set non-existent account {client.hash}, so nothing was set')
+            return {
+                Fields.result: False,
+                Fields.message: f'Account {client.hash} does not exist, nothing was set',
+            }
+        self._send_cookies_to_clients(client, cookies)
+        SERVER_LOGGER.info(f'Client {client.full_address} successfully set {client.hash} cookies')
+        return {
+            Fields.result: True,
+            Fields.message: f'Cookies has been set successfully',
+        }
+
+    @staticmethod
+    def _send_cookies_to_clients(client: Client, new_cookies: List[Dict]) -> None:
+        # проверку словаря делали в execute
+        for other_client in client.registered_clients[client.hash]:
+            if client is other_client:
+                continue
+            output = {
+                Fields.command: Commands.set,
+                Fields.cookies: new_cookies,
+            }
+            output_json = json.dumps(output).encode(ENCODING)
+            other_client.socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
+
+class GetCookiesCommand(Command):
+
+    def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        if not client.hash:
+            SERVER_LOGGER.info(f'Client {client.full_address} does not sent {Fields.hash}')
+            return {
+                Fields.result: False,
+                Fields.message: f'You should send {Fields.hash}',
+            }
+        try:
+            cookies = storage.get_cookies(client.hash)
+        except AccountNotInStorageError:
+            SERVER_LOGGER.info(
+                f'Client {client.full_address} tried to get cookies {client.hash}, but they are not in storage',
+            )
+            return {
+                Fields.result: False,
+                Fields.message: f'You tried to get cookies {client.hash}, but they are not in storage',
+            }
+        SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.get} command')
+        return {
+            Fields.result: True,
+            Fields.cookies: cookies,
+        }

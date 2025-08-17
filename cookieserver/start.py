@@ -1,5 +1,5 @@
 import argparse
-from resoserver.server import Server
+from cookieserver.src.server import Server
 
 def main():
     parser = argparse.ArgumentParser(

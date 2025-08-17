@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from tenacity import retry, stop_after_attempt, retry_if_not_exception_type, wait_fixed
 
-from resoserver.choices import Fields, Commands
+from cookieserver.src.choices import Fields, Commands
 from client.handlers import recv_data_or_none
 from src.exceptions import InvalidHash, CantConnectServer
 
@@ -58,9 +58,7 @@ class Manager:
             Fields.hash: hsh,
             Fields.cookies: cookies,
         }
-        result = self._send_output(output)
-        if result[Fields.result] is False:
-            raise InvalidHash(InvalidHash.msg.format(hash=hsh))
+        self._send_output(output)
 
     def start_cookies_receiver(self):
         self._receiver_is_running = True

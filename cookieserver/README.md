@@ -19,5 +19,5 @@ sudo ufw allow 52314
 
 Для простого запуска сервера (из каталога opt):
 ```bash
-python -m resoserver.start
+python -m cookieserver.start
 ```

@@ -1,11 +1,11 @@
 [Unit]
-Description=Reso socket server
+Description=Cookie dispatch server
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt
-ExecStart=/usr/bin/python3 -m resoserver.start
+ExecStart=/usr/bin/python3 -m cookieserver.start
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
