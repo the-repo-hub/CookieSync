@@ -1,7 +1,10 @@
 from typing import Dict
 import socket
 
-class NoHashException(Exception):
+class NoAccountException(Exception):
+    pass
+
+class AlreadyRegistered(Exception):
     pass
 
 class Client:
@@ -13,17 +16,22 @@ class Client:
         self.full_address = client_socket.getpeername()
         self.address, self.port = self.full_address
         self.hash = None
-        self.registered = False
+        self._registered = False
 
     def register(self) -> None:
         if not self.hash:
-            raise NoHashException
+            raise NoAccountException
+        if self._registered:
+            raise AlreadyRegistered
         if not self.registered_clients.get(self.hash):
             self.registered_clients[self.hash] = set()
         self.registered_clients[self.hash].add(self)
-        self.registered = True
+        self._registered = True
 
     def unregister(self) -> None:
         if self.registered_clients.get(self.hash):
             self.registered_clients[self.hash].discard(self)
-            self.registered = False
+            self._registered = False
+
+    def is_registered(self) -> bool:
+        return self._registered

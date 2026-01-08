@@ -1,1 +1,0 @@
-"""Reso auto main module."""

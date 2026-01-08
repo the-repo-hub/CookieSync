@@ -12,6 +12,12 @@ class AccountNotInStorageError(Exception):
 class SetCookiesTimeoutError(Exception):
     pass
 
+class SameCookiesError(Exception):
+    pass
+
+class AccountAlreadyExists(Exception):
+    pass
+
 class CookieStorage:
 
     def __init__(self):
@@ -30,7 +36,7 @@ class CookieStorage:
                 file.close()
                 SERVER_LOGGER.warning(f'Error in decoding {filename}, passing this file.')
                 continue
-            self._cookie_timer[hsh] = time.time()
+            self._cookie_timer[hsh] = 0
             file.close()
 
     @cached_property
@@ -57,12 +63,14 @@ class CookieStorage:
             raise AccountNotInStorageError
         return cookies
 
-    def add_account(self, hsh: str) -> None:
+    def add_file(self, hsh: str) -> None:
+        if hsh in self._accounts:
+            raise AccountAlreadyExists
         self._accounts[hsh] = self._cookie_sample
         self._write_to_file(hsh)
         self._cookie_timer[hsh] = time.time()
 
-    def remove_account(self, hsh: str) -> None:
+    def remove_file(self, hsh: str) -> None:
         filename = f'{hsh}.json'
         try:
             self._accounts.pop(hsh)
@@ -76,7 +84,10 @@ class CookieStorage:
     def set_cookies(self, hsh: str, new_cookies: List[Dict]) -> None:
         if not self._accounts.get(hsh):
             raise AccountNotInStorageError
-        if not time.time() - self._cookie_timer[hsh] > COOKIE_TIMEOUT:
+        if time.time() - self._cookie_timer[hsh] < COOKIE_TIMEOUT:
             raise SetCookiesTimeoutError
+        if new_cookies == self._accounts[hsh]:
+            raise SameCookiesError
         self._accounts[hsh] = new_cookies
         self._cookie_timer[hsh] = time.time()
+        self._write_to_file(hsh)

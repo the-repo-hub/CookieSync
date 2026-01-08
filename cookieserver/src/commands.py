@@ -3,8 +3,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, List
 
 from cookieserver.src.choices import Commands, Fields
-from cookieserver.src.client import Client, NoHashException
-from cookieserver.src.storage import CookieStorage, SetCookiesTimeoutError, AccountNotInStorageError
+from cookieserver.src.client import Client, NoAccountException
+from cookieserver.src.storage import CookieStorage, SetCookiesTimeoutError, AccountNotInStorageError, SameCookiesError, AccountAlreadyExists
 from cookieserver.src.settings import SERVER_LOGGER, ENCODING
 
 
@@ -32,7 +32,14 @@ class CreateCookiesCommand(Command):
                 Fields.result: False,
                 Fields.message: f'You must send {Fields.hash}',
             }
-        storage.add_account(client.hash)
+        try:
+            storage.add_file(client.hash)
+        except AccountAlreadyExists:
+            SERVER_LOGGER.info(f'Client {client.full_address} tried to create {client.hash} account, which already exists')
+            return {
+                Fields.result: False,
+                Fields.message: f'Account {client.hash} already exists',
+            }
         SERVER_LOGGER.info(f'Client {client.full_address} has created a {client.hash} account')
         return {
             Fields.result: True,
@@ -44,7 +51,7 @@ class RegisterCommand(Command):
     def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
         try:
             client.register()
-        except NoHashException:
+        except NoAccountException:
             SERVER_LOGGER.info(
                 f'Client {client.full_address} unsuccessfully executed {Commands.register} command. {Fields.hash} not found.',
             )
@@ -52,10 +59,18 @@ class RegisterCommand(Command):
                 Fields.result: False,
                 Fields.message: f'You must send {Fields.hash}',
             }
+        if not storage.get_cookies(client.hash):
+            SERVER_LOGGER.info(f'Client {client.full_address} sent {Fields.hash} {client.hash}, which not in storage')
+            client.unregister()
+            return {
+                Fields.result: False,
+                Fields.message: f'Hash {client.hash} not found in storage',
+            }
         SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.register} command')
         return {
             Fields.result: True,
             Fields.message: f'You was successfully registered for cookie dispatching',
+            Fields.cookies: storage.get_cookies(client.hash),
         }
 
 class DeleteCommand(Command):
@@ -69,7 +84,7 @@ class DeleteCommand(Command):
             }
             return result
         try:
-            storage.remove_account(client.hash)
+            storage.remove_file(client.hash)
         except AccountNotInStorageError:
             SERVER_LOGGER.info(f'Client {client.full_address} account {client.hash} not found in storage')
             return {
@@ -93,7 +108,7 @@ class SetCookiesCommand(Command):
                 Fields.result: False,
                 Fields.message: f'You should send {Fields.hash}',
             }
-        if not client.registered:
+        if not client.is_registered():
             SERVER_LOGGER.info(f'Client {client.full_address} was not registered, so cookies cannot be set')
             return {
                 Fields.result: False,
@@ -112,7 +127,7 @@ class SetCookiesCommand(Command):
             SERVER_LOGGER.info(f'Client {client.full_address} tried to set new cookies, but they was already set successfully by other client')
             return {
                 Fields.result: False,
-                Fields.message: 'Cookies was already set successfully',
+                Fields.message: 'Cookies already have set successfully',
             }
         except AccountNotInStorageError:
             SERVER_LOGGER.info(f'Client {client.full_address} tried to set non-existent account {client.hash}, so nothing was set')
@@ -120,11 +135,17 @@ class SetCookiesCommand(Command):
                 Fields.result: False,
                 Fields.message: f'Account {client.hash} does not exist, nothing was set',
             }
+        except SameCookiesError:
+            SERVER_LOGGER.info(f'Client {client.full_address} tried to set same cookie {client.hash}')
+            return {
+                Fields.result: False,
+                Fields.message: 'This cookies was already set successfully',
+            }
         self._send_cookies_to_clients(client, cookies)
         SERVER_LOGGER.info(f'Client {client.full_address} successfully set {client.hash} cookies')
         return {
             Fields.result: True,
-            Fields.message: f'Cookies has been set successfully',
+            Fields.message: 'Cookies was set successfully',
         }
 
     @staticmethod
@@ -138,6 +159,7 @@ class SetCookiesCommand(Command):
                 Fields.cookies: new_cookies,
             }
             output_json = json.dumps(output).encode(ENCODING)
+            #todo а если клиент в это время отключится?
             other_client.socket.sendall(len(output_json).to_bytes(4, 'big') + output_json)
 
 class GetCookiesCommand(Command):

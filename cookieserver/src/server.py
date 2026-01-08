@@ -29,7 +29,6 @@ class Server:
     def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
-        self._accounts: Dict[str, Dict] = {}
         self.socket = None
         self._init_socket()
         self._storage = CookieStorage()
@@ -73,6 +72,9 @@ class Server:
         return command_instance.execute(self._storage, client, json_data)
 
     def _get_json_data(self, client: Client) -> Optional[Dict]:
+        """
+        Syntax parsing incoming JSON data. If invalid, returns None.
+        """
         try:
             length_bytes = recv_data_or_none(client.socket, 4)
         except ssl.SSLError as e:
@@ -101,6 +103,9 @@ class Server:
             return None
 
     def _handle_client(self, client: Client):
+        """
+        Handle a client connection.
+        """
         SERVER_LOGGER.info(f'Client connected: {client.full_address}')
         while True:
             json_data = self._get_json_data(client)
@@ -108,6 +113,8 @@ class Server:
                 break
             output = self._get_output(client, json_data)
             bytes_output = json.dumps(output).encode(ENCODING)
+            #todo а если клиент в это время отключится?
+            # нужно обработать исключение для sendall
             client.socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
         client.unregister()
         client.socket.close()
@@ -143,7 +150,8 @@ class Server:
             else:
                 client = Client(client_socket)
                 Thread(target=self._handle_client, args=(client,), daemon=True).start()
-        self.socket.close()
 
     def stop(self):
         self._running = False
+        self.socket.shutdown(socket.SHUT_WR)
+        self.socket.close()
