@@ -4,8 +4,8 @@
 /.venv/
 /src/geckodriver.log
 /.mypy_cache/
-/tests/.pytest_cache/
-/tests/geckodriver.log
+/cookieserver/tests/.pytest_cache/
+/cookieserver/tests/geckodriver.log
 /.env
 /cookieserver/keys/key.pem
 /cookieserver/keys/cert.pem
