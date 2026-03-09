@@ -21,7 +21,7 @@ class AccountAlreadyExists(Exception):
 class CookieStorage:
 
     def __init__(self):
-        self._accounts: Dict[str, List[Dict]] = {}
+        self._cookies: Dict[str, List[Dict]] = {}
         self._cookie_timer: Dict[str, float] = {}
         self._init_accounts()
 
@@ -31,7 +31,7 @@ class CookieStorage:
             hsh = filename.split('.')[0]
             file = open(os.path.join(ACCOUNTS_PATH, filename))
             try:
-                self._accounts[hsh] = json.loads(file.read())
+                self._cookies[hsh] = json.loads(file.read())
             except json.decoder.JSONDecodeError:
                 file.close()
                 SERVER_LOGGER.warning(f'Error in decoding {filename}, passing this file.')
@@ -51,43 +51,44 @@ class CookieStorage:
         os.makedirs(ACCOUNTS_PATH, exist_ok=True)
         with open(full_path, 'w') as f:
             f.write(
-                json.dumps(self._accounts[hsh]),
+                json.dumps(self._cookies[hsh]),
             )
 
     def get_all_accounts(self) -> List[str]:
-        return list(self._accounts.keys())
+        return list(self._cookies.keys())
 
     def get_cookies(self, hsh: str) -> List[Dict]:
-        cookies = self._accounts.get(hsh)
-        if not cookies:
-            raise AccountNotInStorageError
+        cookies = self._cookies.get(hsh)
         return cookies
 
     def add_file(self, hsh: str) -> None:
-        if hsh in self._accounts:
-            raise AccountAlreadyExists
-        self._accounts[hsh] = self._cookie_sample
+        if hsh in self._cookies:
+            raise AccountAlreadyExists()
+        self._cookies[hsh] = self._cookie_sample
         self._write_to_file(hsh)
         self._cookie_timer[hsh] = time.time()
 
     def remove_file(self, hsh: str) -> None:
         filename = f'{hsh}.json'
         try:
-            self._accounts.pop(hsh)
+            self._cookies.pop(hsh)
         except KeyError:
-            raise AccountNotInStorageError
+            raise AccountNotInStorageError()
         try:
             os.remove(os.path.join(ACCOUNTS_PATH, filename))
         except FileNotFoundError:
             SERVER_LOGGER.warning(f'Cookie file {filename} not found, but account {hsh} removed.')
 
-    def set_cookies(self, hsh: str, new_cookies: List[Dict]) -> None:
-        if not self._accounts.get(hsh):
-            raise AccountNotInStorageError
+    def _do_all_checks(self, hsh: str, new_cookies: List[Dict]) -> None:
+        if not self._cookies.get(hsh):
+            raise AccountNotInStorageError()
         if time.time() - self._cookie_timer[hsh] < COOKIE_TIMEOUT:
-            raise SetCookiesTimeoutError
-        if new_cookies == self._accounts[hsh]:
-            raise SameCookiesError
-        self._accounts[hsh] = new_cookies
+            raise SetCookiesTimeoutError()
+        if new_cookies == self._cookies[hsh]:
+            raise SameCookiesError()
+
+    def set_cookies(self, hsh: str, new_cookies: List[Dict]) -> None:
+        self._do_all_checks(hsh, new_cookies)
+        self._cookies[hsh] = new_cookies
         self._cookie_timer[hsh] = time.time()
         self._write_to_file(hsh)

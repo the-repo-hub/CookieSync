@@ -10,6 +10,7 @@ class Commands:
 class Fields:
     command = 'command'
     hash = 'hash'
-    cookies = 'cookies'
     result = 'result'
     message = 'message'
+    payload = 'payload'
+    request_id = 'request_id'

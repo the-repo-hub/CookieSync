@@ -1,5 +1,4 @@
 import json
-import os
 import socket
 import ssl
 from threading import Thread
@@ -10,13 +9,14 @@ from cookieserver.src.client import Client
 from cookieserver.src.commands import Command, GetAllAccountsCommand, RegisterCommand, SetCookiesCommand, DeleteCommand, \
     CreateCookiesCommand, GetCookiesCommand
 from cookieserver.src.handlers import recv_data_or_none
-from cookieserver.src.settings import KEYS_PATH, SERVER_LOGGER, ENCODING
+from cookieserver.src.settings import SERVER_LOGGER, ENCODING
 from cookieserver.src.storage import CookieStorage
 
 
 class Server:
 
     MAX_CHUNK = 1024
+    #todo убрать
     commands: Dict[str, Type[Command]] = {
         Commands.get_all: GetAllAccountsCommand(),
         Commands.create: CreateCookiesCommand(),
@@ -31,7 +31,7 @@ class Server:
         self.port = port
         self.socket = None
         self._init_socket()
-        self._storage = CookieStorage()
+        self._cookie_storage = CookieStorage()
         self._running = False
 
     def _init_socket(self):
@@ -44,13 +44,14 @@ class Server:
         _socket.bind((self.host, self.port))
         _socket.listen(10)
         _socket.settimeout(1)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(
-            certfile=os.path.join(KEYS_PATH, 'cert.pem'),
-            keyfile=os.path.join(KEYS_PATH, 'key.pem'),
-        )
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        self.socket = context.wrap_socket(_socket, server_side=True)
+        self.socket = _socket
+        # context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # context.load_cert_chain(
+        #     certfile=os.path.join(KEYS_PATH, 'cert.pem'),
+        #     keyfile=os.path.join(KEYS_PATH, 'key.pem'),
+        # )
+        # context.minimum_version = ssl.TLSVersion.TLSv1_2
+        # self.socket = context.wrap_socket(_socket, server_side=True)
 
     def _get_output(self, client: Client, json_data: Dict) -> Dict:
         command = json_data.get(Fields.command)
@@ -69,12 +70,19 @@ class Server:
                 Fields.result: False,
                 Fields.message: f'{command} is invalid command',
             }
-        return command_instance.execute(self._storage, client, json_data)
+        result = command_instance.execute(
+            storage=self._cookie_storage,
+            client=client,
+            json_data=json_data
+        )
+        result[Fields.request_id] = json_data.get(Fields.request_id)
+        return result
 
     def _get_json_data(self, client: Client) -> Optional[Dict]:
         """
         Syntax parsing incoming JSON data. If invalid, returns None.
         """
+        # todo убрать наны
         try:
             length_bytes = recv_data_or_none(client.socket, 4)
         except ssl.SSLError as e:
@@ -113,7 +121,7 @@ class Server:
                 break
             output = self._get_output(client, json_data)
             bytes_output = json.dumps(output).encode(ENCODING)
-            #todo а если клиент в это время отключится?
+            # todo а если клиент в это время отключится?
             # нужно обработать исключение для sendall
             client.socket.sendall(len(bytes_output).to_bytes(4, 'big') + bytes_output)
         client.unregister()
@@ -154,4 +162,3 @@ class Server:
     def stop(self):
         self._running = False
         self.socket.shutdown(socket.SHUT_WR)
-        self.socket.close()

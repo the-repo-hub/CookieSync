@@ -49,6 +49,13 @@ class CreateCookiesCommand(Command):
 class RegisterCommand(Command):
 
     def execute(self, storage: CookieStorage, client: Client, json_data: Dict) -> Dict:
+        if not storage.get_cookies(client.hash):
+            SERVER_LOGGER.info(f'Client {client.full_address} sent {Fields.hash} {client.hash}, which not in storage')
+            client.unregister()
+            return {
+                Fields.result: False,
+                Fields.message: f'Hash {client.hash} not found in storage',
+            }
         try:
             client.register()
         except NoAccountException:
@@ -59,18 +66,11 @@ class RegisterCommand(Command):
                 Fields.result: False,
                 Fields.message: f'You must send {Fields.hash}',
             }
-        if not storage.get_cookies(client.hash):
-            SERVER_LOGGER.info(f'Client {client.full_address} sent {Fields.hash} {client.hash}, which not in storage')
-            client.unregister()
-            return {
-                Fields.result: False,
-                Fields.message: f'Hash {client.hash} not found in storage',
-            }
         SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.register} command')
         return {
             Fields.result: True,
             Fields.message: f'You was successfully registered for cookie dispatching',
-            Fields.cookies: storage.get_cookies(client.hash),
+            Fields.payload: storage.get_cookies(client.hash),
         }
 
 class DeleteCommand(Command):
@@ -114,12 +114,12 @@ class SetCookiesCommand(Command):
                 Fields.result: False,
                 Fields.message: f'You should send {Commands.register} command first',
             }
-        cookies = json_data.get(Fields.cookies)
+        cookies = json_data.get(Fields.payload)
         if not cookies:
             SERVER_LOGGER.info(f'Client {client.full_address} does not sent cookies')
             return {
                 Fields.result: False,
-                Fields.message: f'You should send {Fields.cookies} data',
+                Fields.message: f'You should send {Fields.payload} data',
             }
         try:
             storage.set_cookies(client.hash, cookies)
@@ -141,7 +141,8 @@ class SetCookiesCommand(Command):
                 Fields.result: False,
                 Fields.message: 'This cookies was already set successfully',
             }
-        self._send_cookies_to_clients(client, cookies)
+        request_id = json_data.get('request_id')
+        self._send_cookies_to_clients(client, cookies, request_id)
         SERVER_LOGGER.info(f'Client {client.full_address} successfully set {client.hash} cookies')
         return {
             Fields.result: True,
@@ -149,14 +150,15 @@ class SetCookiesCommand(Command):
         }
 
     @staticmethod
-    def _send_cookies_to_clients(client: Client, new_cookies: List[Dict]) -> None:
+    def _send_cookies_to_clients(client: Client, new_cookies: List[Dict], request_id: str) -> None:
         # проверку словаря делали в execute
         for other_client in client.registered_clients[client.hash]:
             if client is other_client:
                 continue
             output = {
+                Fields.request_id: request_id,
                 Fields.command: Commands.set,
-                Fields.cookies: new_cookies,
+                Fields.payload: new_cookies,
             }
             output_json = json.dumps(output).encode(ENCODING)
             #todo а если клиент в это время отключится?
@@ -184,5 +186,5 @@ class GetCookiesCommand(Command):
         SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.get} command')
         return {
             Fields.result: True,
-            Fields.cookies: cookies,
+            Fields.payload: cookies,
         }
