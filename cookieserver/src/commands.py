@@ -1,15 +1,14 @@
 import asyncio
 import json
+import logging
 from abc import ABC, abstractmethod
-from asyncio import StreamWriter
 from typing import Dict, Type
-from cookieserver.src.message import Message
 
 from cookieserver.src.choices import Commands, Fields
+from cookieserver.src.client import Client
+from cookieserver.src.message import Message
 from cookieserver.src.settings import SERVER_LOGGER, ENCODING
 from cookieserver.src.storage import AccountStorage
-from cookieserver.src.client import Client
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +50,11 @@ class CreateCookiesCommand(Command):
 class DeleteCommand(Command):
 
     def execute(self, storage: AccountStorage, message: Message, client: Client) -> Dict:
-        storage.remove_account(client.account_name)
+        storage.remove_account(message.account)
         # todo прописать логику отключения клиентов
-        SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.delete} command. Cookies {client.account_name} removed')
+        SERVER_LOGGER.info(f'Client {client.full_address} successfully executed {Commands.delete} command. Cookies {message.account} removed')
         result = {
-            Fields.message: f'Account {client.account_name} was removed successfully',
+            Fields.message: f'Account {message.account} was removed successfully',
         }
         return result
 
