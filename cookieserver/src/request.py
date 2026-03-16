@@ -1,11 +1,15 @@
-from cookieserver.src.errors import HandleCommandError
-from cookieserver.src.choices import Fields
-from typing import Dict
 from dataclasses import dataclass
+from typing import Dict
+
+from cookieserver.src.choices import Fields
+from cookieserver.src.client import Client
+from cookieserver.src.errors import HandleCommandError
+
 
 @dataclass
-class Message:
+class Request:
     raw_data: Dict
+    client: Client
 
     def __post_init__(self):
         self.command = self.raw_data.get(Fields.command)

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
-from cookieserver.src.choices import Fields, Commands
+from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.server import Server
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_SERVER_PATH
 
@@ -38,19 +38,19 @@ def not_storage_account(server):
     account = 'test_to_create'
     yield account
     try:
-        server._account_storage.remove_account(account)
+        server.account_storage.remove_account(account)
     except Exception:
         pass
 
 @pytest.fixture
 def account(server, cookies):
-    test_account = 'test_account'
-    if test_account in server._account_storage.get_all_accounts():
-        server._account_storage.require_account(test_account)
-    server._account_storage.add_account(test_account)
-    yield test_account
+    test_account_name = 'test_account'
+    if test_account_name in server.account_storage.get_all_accounts():
+        server.account_storage.remove_account(test_account_name)
+    server.account_storage.add_account(test_account_name)
+    yield test_account_name
     try:
-        server._account_storage.require_account(test_account)
+        server.account_storage.remove_account(test_account_name)
     except Exception:
         pass
 
@@ -62,6 +62,11 @@ async def async_client(server):
     yield client
     await client.close()
 
+def fake_set_payload(self, payload):
+    # просто сохраняем payload без проверки времени
+    self.payload = payload
+    self.updated_at = 0
+    self.write_file()
 
 class AsyncClient:
     def __init__(self, identifier: str):
@@ -80,7 +85,7 @@ class AsyncClient:
         self.reader, self.writer = await asyncio.open_connection(host, port)
         self.listen_task = asyncio.create_task(self.listen())
 
-    async def send_request(self, payload: Dict, timeout=1000):
+    async def send_request(self, payload: Dict, timeout=10):
         request_id = str(uuid.uuid4())
         payload[Fields.request_id] = request_id
         encoded = json.dumps(payload).encode()
@@ -141,6 +146,15 @@ class AsyncClient:
 class TestCookieServer:
     """Test class for CookieServer."""
 
+    async def wait_until(self, predicate, timeout=1, interval=0.01):
+        start = asyncio.get_running_loop().time()
+        while True:
+            if predicate():
+                return
+            if asyncio.get_running_loop().time() - start > timeout:
+                raise TimeoutError("Condition not met")
+            await asyncio.sleep(interval)
+
     @pytest.mark.asyncio
     async def test_account_creation(self, server, not_storage_account, async_client):
 
@@ -151,7 +165,7 @@ class TestCookieServer:
         response = await async_client.send_request(payload)
         assert response[Fields.result]
         assert not_storage_account in [acc.split('.')[0] for acc in os.listdir(ACCOUNTS_PATH)]
-        assert not_storage_account in server._account_storage.get_all_accounts()
+        assert not_storage_account in server.account_storage.get_all_accounts()
 
     @pytest.mark.asyncio
     async def test_account_removing(self, server, account, async_client):
@@ -162,7 +176,7 @@ class TestCookieServer:
         response = await async_client.send_request(payload)
         assert response[Fields.result]
         assert account not in [acc.split('.')[0] for acc in os.listdir(ACCOUNTS_PATH)]
-        assert account not in server._account_storage.get_all_accounts()
+        assert account not in server.account_storage.get_all_accounts()
 
     @pytest.mark.asyncio
     async def test_delete_failed(self, server, async_client, not_storage_account):
@@ -174,6 +188,29 @@ class TestCookieServer:
         response = await async_client.send_request(payload)
         assert not response[Fields.result]
 
+    @pytest.mark.asyncio
+    async def test_register(self, server, account, async_client):
+        payload = {
+            Fields.command: Commands.register,
+            Fields.account: account,
+        }
+        response = await async_client.send_request(payload)
+        assert response[Fields.result]
+        assert server.clients_by_account.get(account)
+        await async_client.close()
+        await self.wait_until(lambda: not server.clients_by_account.get(account))
+
+    @pytest.mark.asyncio
+    async def test_register_failed(self, server, async_client, not_storage_account):
+        #there is no that cookie on server, so server cant do it
+        payload = {
+            Fields.request_id: str(uuid.uuid4()),
+            Fields.command: Commands.register,
+            Fields.account: not_storage_account,
+        }
+        response = await async_client.send_request(payload)
+        assert not response[Fields.result]
+        assert not server.clients_by_account.get(not_storage_account)
 
     @pytest.mark.asyncio
     async def test_set(self, server, cookies, account, async_client):
@@ -184,25 +221,19 @@ class TestCookieServer:
         await client_conn_2.connect(SERVER_ADDRESS, SERVER_PORT)
         await async_client.send_request(
             payload={
-                Fields.command: Commands.get,
+                Fields.command: Commands.register,
                 Fields.account: account,
             }
         )
 
         await client_conn_2.send_request(
             payload={
-                Fields.command: Commands.get,
+                Fields.command: Commands.register,
                 Fields.account: account
             }
         )
         async_client.cookies = cookies
         assert not client_conn_2.cookies
-
-        def fake_set_payload(self, payload):
-            # просто сохраняем payload без проверки времени
-            self._payload = payload
-            self.updated_at = 0
-            self.write_file()
 
         with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
             response = await async_client.send_request(
@@ -214,16 +245,16 @@ class TestCookieServer:
                 }
             )
 
-        assert len(server._account_storage.get_clients_by_account(account)) == 2
+        assert len(server.clients_by_account.get(account)) == 2
         assert response[Fields.result] is True
         # проверки на то, что обычное изменение кук работает
         assert response[Fields.result]
-        assert server._account_storage.get_account(account).get_payload() == cookies
+        assert server.account_storage.get_account(account).payload == cookies
         assert account in [acc.split('.')[0] for acc in os.listdir(ACCOUNTS_PATH)]
 
         # проверки на то, что сервер отправил куки и они были корректно приняты
-        await asyncio.sleep(0.1)
-        assert client_conn_2.cookies
+
+        await self.wait_until(lambda: client_conn_2.cookies)
         assert async_client.cookies == client_conn_2.cookies
         await client_conn_2.close()
 
@@ -245,16 +276,16 @@ class TestCookieServer:
             }
         )
         await client_failed.close()
-        async_client.cookies = cookies
-        response = await async_client.send_request(
-            payload={
-                Fields.command: Commands.set,
-                Fields.account: account,
-                Fields.payload: cookies,
-            }
-        )
-
+        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
+            response = await async_client.send_request(
+                payload={
+                    Fields.command: Commands.set,
+                    Fields.account: account,
+                    Fields.payload: cookies,
+                }
+            )
+        # сет успешный, провал одного аккаунта не должен влиять на результат
         assert response[Fields.result]
-        assert server._account_storage.get_cookies(account) == cookies
+        assert server.account_storage.get_account(account).payload == cookies
         # на всякий случай
         assert not client_failed.cookies

@@ -5,14 +5,15 @@ import os
 import ssl
 from asyncio import StreamReader, StreamWriter
 from typing import Dict, Set
+from urllib.request import Request
 
-from cookieserver.src.client import Client
 from cookieserver.src.choices import Fields
+from cookieserver.src.client import Client
 from cookieserver.src.commands import COMMAND_REGISTRY
 from cookieserver.src.errors import HandleCommandError
+from cookieserver.src.request import Request
 from cookieserver.src.settings import KEYS_PATH
 from cookieserver.src.storage import AccountStorage
-from cookieserver.src.message import Message
 
 logger = logging.getLogger(__name__)
 # в каждом клиенте есть имя аккаунта - значит, де-факто, у нас всегда есть аккаунт
@@ -29,7 +30,7 @@ class Server:
         # {account_name: set(client, client2)}
         # аккаунт
         self.clients_by_account: Dict[str, Set[Client]] = {}
-        self._account_storage = AccountStorage(self.clients_by_account)
+        self.account_storage = AccountStorage(self.clients_by_account)
 
         # тут перечислены все входящие подключения, чтобы их было легче убить при остановке сервера
         self._client_tasks = set()
@@ -39,9 +40,7 @@ class Server:
         Handle a client connection.
         """
         logger.info(f"Client connected: {writer.get_extra_info('peername')}")
-        current_account = None
-        client = None
-        request_id = None
+        request = None
         try:
             while True:
                 # читаем длину сообщения
@@ -54,18 +53,19 @@ class Server:
 
                 # проверяем валидность сообщения
                 raw_data = json.loads(raw_data.decode())
-                message = Message(raw_data)
-                command_class = COMMAND_REGISTRY.get(message.command)
+                client = Client(writer)
+                request = Request(
+                    raw_data=raw_data,
+                    client=client
+                )
+
+                command_class = COMMAND_REGISTRY.get(request.command)
                 if not command_class:
                     raise HandleCommandError("Command does not exist")
-                current_account = message.account
-                request_id = message.request_id
-                client = Client(writer)
-                self.clients_by_account.setdefault(message.account, set()).add(client)
-                response = command_class().execute(storage=self._account_storage, message=message, client=client)
+                response = command_class().execute(storage=self.account_storage, request=request)
                 response.update({
                     Fields.result: True,
-                    Fields.request_id: request_id,
+                    Fields.request_id: request.request_id,
                 })
                 encoded = json.dumps(response).encode()  # сериализуем в JSON
                 length_prefix = len(encoded).to_bytes(4, "big")  # 4 байта длины, big-endian
@@ -77,17 +77,15 @@ class Server:
                 Fields.result: False,
                 Fields.message: str(e),
             }
-            if request_id:
-                error_response[Fields.request_id] = request_id
+            if request:
+                error_response[Fields.request_id] = request.request_id
             encoded = json.dumps(error_response).encode()
             length_prefix = len(encoded).to_bytes(4, "big")
             writer.write(length_prefix + encoded)  # сначала длина, потом данные
             await writer.drain()
         finally:
-            #  если сообщение некорректное и команды нет на сервере - не выполнится
-            if current_account and client:
-                # todo а если из clients_by_account будет удаление ключа?
-                self.clients_by_account.get(current_account).discard(client)
+            if request and (clients := self.clients_by_account.get(request.account)):
+                clients.discard(request.client)
             writer.close()
             await writer.wait_closed()
 

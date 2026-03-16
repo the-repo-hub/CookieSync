@@ -1,6 +1,8 @@
 import argparse
-from cookieserver.src.server import Server
 import asyncio
+
+from cookieserver.src.server import Server
+
 
 def main():
     parser = argparse.ArgumentParser(

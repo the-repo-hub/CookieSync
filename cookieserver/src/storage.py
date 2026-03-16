@@ -4,35 +4,32 @@ import time
 from functools import cached_property
 from typing import Dict, List, Optional, Set
 
-from cookieserver.src.errors import StorageError
-from cookieserver.src.settings import ACCOUNTS_PATH, SRC_PATH, COOKIE_TIMEOUT
 from cookieserver.src.client import Client
+from cookieserver.src.errors import StorageError
+from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT, SRC_PATH
 
 
 class Account:
 
     def __init__(self, name, payload):
         self.name = name
-        self._payload = payload
+        self.payload = payload
         self.updated_at = time.time()
         filename = f'{self.name}.json'
         self.full_path = os.path.join(ACCOUNTS_PATH, filename)
 
     def set_payload(self, payload):
-        if payload == self._payload:
+        if payload == self.payload:
             raise StorageError('Payload is same, set is failed')
         if time.time() - self.updated_at < COOKIE_TIMEOUT:
             raise StorageError('You are setting too fast')
         self.updated_at = time.time()
-        self._payload = payload
+        self.payload = payload
         self.write_file()
-
-    def get_payload(self) -> List[Dict]:
-        return self._payload
 
     def write_file(self):
         with open(self.full_path, 'w') as f:
-            f.write(json.dumps(self._payload))
+            f.write(json.dumps(self.payload))
 
     def remove_file(self):
         if os.path.exists(self.full_path):
@@ -42,18 +39,12 @@ class Account:
 
 class AccountStorage:
 
-    def __init__(self, server_clients: Dict[str, Set[Client]]):
+    def __init__(self, clients_by_accounts: Dict[str, Set[Client]]):
         self._accounts: Dict[str, Account] = {}
-        self._account_clients = server_clients
+        self.clients_by_account = clients_by_accounts
         self._load_accounts()
 
-    def get_clients_by_account(self, account_name: str) -> Set[Client]:
-        return self._account_clients.get(account_name)
-
     def _load_accounts(self) -> None:
-        if not os.path.exists(ACCOUNTS_PATH):
-            raise StorageError(f'Accounts path does not exist: {ACCOUNTS_PATH}')
-
         for filename in os.listdir(ACCOUNTS_PATH):
             if not filename.endswith(".json"):
                 continue

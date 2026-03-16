@@ -1,7 +1,8 @@
-import os
 import logging
-from logging.handlers import MemoryHandler
+import os
 from logging import getLogger
+from logging.handlers import MemoryHandler
+
 
 def get_logger():
     logging.basicConfig(
