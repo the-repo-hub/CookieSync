@@ -32,9 +32,6 @@ class Server:
         self.clients_by_account: Dict[str, Set[Client]] = {}
         self.account_storage = AccountStorage(self.clients_by_account)
 
-        # тут перечислены все входящие подключения, чтобы их было легче убить при остановке сервера
-        self._client_tasks = set()
-
     async def _handle_client(self, reader: StreamReader, writer: StreamWriter):
         """
         Handle a client connection.
@@ -62,7 +59,10 @@ class Server:
                 command_class = COMMAND_REGISTRY.get(request.command)
                 if not command_class:
                     raise HandleCommandError("Command does not exist")
-                response = command_class().execute(storage=self.account_storage, request=request)
+                response = await command_class().execute(
+                    storage=self.account_storage,
+                    request=request,
+                )
                 response.update({
                     Fields.result: True,
                     Fields.request_id: request.request_id,
@@ -111,12 +111,6 @@ class Server:
         if self.server:
             self.server.close()
             await self.server.wait_closed()
-
-        # отменяем задачи клиентов
-        for task in self._client_tasks:
-            task.cancel()
-
-        await asyncio.gather(*self._client_tasks, return_exceptions=True)
 
         # закрываем клиентов
         for clients_set in self.clients_by_account.values():

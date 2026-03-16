@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Set
 from cookieserver.src.client import Client
 from cookieserver.src.errors import StorageError
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT, SRC_PATH
-
+import asyncio
 
 class Account:
 
@@ -17,6 +17,7 @@ class Account:
         self.updated_at = time.time()
         filename = f'{self.name}.json'
         self.full_path = os.path.join(ACCOUNTS_PATH, filename)
+        self.lock = asyncio.Lock()
 
     def set_payload(self, payload):
         if payload == self.payload:
