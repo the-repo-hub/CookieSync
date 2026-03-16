@@ -9,7 +9,7 @@ class Commands:
 
 class Fields:
     command = 'command'
-    hash = 'hash'
+    account = 'account'
     result = 'result'
     message = 'message'
     payload = 'payload'

@@ -1,5 +1,6 @@
 import argparse
 from cookieserver.src.server import Server
+import asyncio
 
 def main():
     parser = argparse.ArgumentParser(
@@ -22,7 +23,7 @@ def main():
     )
 
     args = parser.parse_args()
-    Server(args.host, args.port).start()
+    asyncio.run(Server(args.host, args.port).start())
 
 if __name__ == "__main__":
     main()

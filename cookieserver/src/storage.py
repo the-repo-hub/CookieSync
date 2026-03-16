@@ -2,42 +2,70 @@ import json
 import os
 import time
 from functools import cached_property
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
-from cookieserver.src.settings import ACCOUNTS_PATH, SRC_PATH, SERVER_LOGGER, COOKIE_TIMEOUT
+from cookieserver.src.errors import StorageError
+from cookieserver.src.settings import ACCOUNTS_PATH, SRC_PATH, COOKIE_TIMEOUT
+from cookieserver.src.client import Client
 
-class AccountNotInStorageError(Exception):
-    pass
 
-class SetCookiesTimeoutError(Exception):
-    pass
+class Account:
 
-class SameCookiesError(Exception):
-    pass
+    def __init__(self, name, payload):
+        self.name = name
+        self._payload = payload
+        self.updated_at = time.time()
+        filename = f'{self.name}.json'
+        self.full_path = os.path.join(ACCOUNTS_PATH, filename)
 
-class AccountAlreadyExists(Exception):
-    pass
+    def set_payload(self, payload):
+        if payload == self._payload:
+            raise StorageError('Payload is same, set is failed')
+        if time.time() - self.updated_at < COOKIE_TIMEOUT:
+            raise StorageError('You are setting too fast')
+        self.updated_at = time.time()
+        self._payload = payload
+        self.write_file()
 
-class CookieStorage:
+    def get_payload(self) -> List[Dict]:
+        return self._payload
 
-    def __init__(self):
-        self._cookies: Dict[str, List[Dict]] = {}
-        self._cookie_timer: Dict[str, float] = {}
-        self._init_accounts()
+    def write_file(self):
+        with open(self.full_path, 'w') as f:
+            f.write(json.dumps(self._payload))
 
-    def _init_accounts(self) -> None:
-        os.makedirs(ACCOUNTS_PATH, exist_ok=True)
+    def remove_file(self):
+        if os.path.exists(self.full_path):
+            os.remove(self.full_path)
+        else:
+            raise StorageError(f'File with path {self.full_path} does not exist')
+
+class AccountStorage:
+
+    def __init__(self, server_clients: Dict[str, Set[Client]]):
+        self._accounts: Dict[str, Account] = {}
+        self._account_clients = server_clients
+        self._load_accounts()
+
+    def get_clients_by_account(self, account_name: str) -> Set[Client]:
+        return self._account_clients.get(account_name)
+
+    def _load_accounts(self) -> None:
+        if not os.path.exists(ACCOUNTS_PATH):
+            raise StorageError(f'Accounts path does not exist: {ACCOUNTS_PATH}')
+
         for filename in os.listdir(ACCOUNTS_PATH):
-            hsh = filename.split('.')[0]
-            file = open(os.path.join(ACCOUNTS_PATH, filename))
-            try:
-                self._cookies[hsh] = json.loads(file.read())
-            except json.decoder.JSONDecodeError:
-                file.close()
-                SERVER_LOGGER.warning(f'Error in decoding {filename}, passing this file.')
+            if not filename.endswith(".json"):
                 continue
-            self._cookie_timer[hsh] = 0
-            file.close()
+
+            name = filename.removesuffix(".json")
+            path = os.path.join(ACCOUNTS_PATH, filename)
+
+            with open(path) as f:
+                payload = json.load(f)
+
+            account = Account(name, payload)
+            self._accounts[name] = account
 
     @cached_property
     def _cookie_sample(self) -> List[Dict]:
@@ -45,50 +73,37 @@ class CookieStorage:
         with open(path) as f:
             return json.loads(f.read())
 
-    def _write_to_file(self, hsh: str):
-        filename = f'{hsh}.json'
-        full_path = os.path.join(ACCOUNTS_PATH, filename)
-        os.makedirs(ACCOUNTS_PATH, exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(
-                json.dumps(self._cookies[hsh]),
-            )
-
     def get_all_accounts(self) -> List[str]:
-        return list(self._cookies.keys())
+        return list(self._accounts.keys())
 
-    def get_cookies(self, hsh: str) -> List[Dict]:
-        cookies = self._cookies.get(hsh)
-        return cookies
+    def get_account(self, account_name: str) -> Optional[Account]:
+        """non strict"""
+        return self._accounts.get(account_name)
 
-    def add_file(self, hsh: str) -> None:
-        if hsh in self._cookies:
-            raise AccountAlreadyExists()
-        self._cookies[hsh] = self._cookie_sample
-        self._write_to_file(hsh)
-        self._cookie_timer[hsh] = time.time()
+    def require_account(self, account_name: str) -> Account:
+        if account := self.get_account(account_name):
+            return account
+        raise StorageError(f"Account {account_name} does not exist")
 
-    def remove_file(self, hsh: str) -> None:
-        filename = f'{hsh}.json'
-        try:
-            self._cookies.pop(hsh)
-        except KeyError:
-            raise AccountNotInStorageError()
-        try:
-            os.remove(os.path.join(ACCOUNTS_PATH, filename))
-        except FileNotFoundError:
-            SERVER_LOGGER.warning(f'Cookie file {filename} not found, but account {hsh} removed.')
+    def add_account(self, account_name: str) -> None:
+        if self.get_account(account_name):
+            raise StorageError(f"Cannot add an existing account {account_name} so it cannot be added")
+        account = Account(account_name, payload=self._cookie_sample)
+        account.write_file()
+        self._accounts[account_name] = account
 
-    def _do_all_checks(self, hsh: str, new_cookies: List[Dict]) -> None:
-        if not self._cookies.get(hsh):
-            raise AccountNotInStorageError()
-        if time.time() - self._cookie_timer[hsh] < COOKIE_TIMEOUT:
-            raise SetCookiesTimeoutError()
-        if new_cookies == self._cookies[hsh]:
-            raise SameCookiesError()
+    def remove_account(self, account_name: str) -> None:
+        account = self.get_account(account_name)
+        if not account:
+            raise StorageError(f"Account {account_name} does not exist so it cannot be removed")
+        account.remove_file()
+        self._accounts.pop(account_name)
 
-    def set_cookies(self, hsh: str, new_cookies: List[Dict]) -> None:
-        self._do_all_checks(hsh, new_cookies)
-        self._cookies[hsh] = new_cookies
-        self._cookie_timer[hsh] = time.time()
-        self._write_to_file(hsh)
+        # если у аккаунта были клиенты, нужно обработать отключение
+        # clients = self._account_clients.pop(account_name)
+        # for client in clients:
+        #     client.writer.close()
+
+    def set_cookies(self, account_name: str, payload: List[Dict]) -> None:
+        account = self.require_account(account_name)
+        account.set_payload(payload)
