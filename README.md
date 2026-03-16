@@ -20,11 +20,6 @@ git clone https://github.com/the-repo-hub/CookieSync
 cd СookieSync
 pip install -r requirements.txt
 ```
-Затем создать .env файл в корне проекта с токеном бота тг и айди чата (разделенного хранилища кук)
-```dotenv
-BOT_TOKEN='ваше string значение'
-CHAT_ID='ваше integer значение'
-```
 
 ### Запуск
 ```bash
