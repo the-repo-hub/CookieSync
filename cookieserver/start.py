@@ -2,6 +2,9 @@ import argparse
 import asyncio
 
 from cookieserver.src.server import Server
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 
 def main():
@@ -25,7 +28,12 @@ def main():
     )
 
     args = parser.parse_args()
-    asyncio.run(Server(args.host, args.port).start())
+    srv = Server(args.host, args.port)
+
+    try:
+        asyncio.run(srv.start())
+    except KeyboardInterrupt:
+        asyncio.run(srv.stop())
 
 if __name__ == "__main__":
     main()

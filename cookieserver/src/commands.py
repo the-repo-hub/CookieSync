@@ -33,8 +33,9 @@ class RegisterCookiesCommand(Command):
         account = storage.require_account(request.account)
         async with account.lock:
             storage.clients_by_account.setdefault(account.name, set()).add(request.client)
+            logger.info(f"Client {request.client.full_address} successfully registered in {account.name}")
             return {
-                Fields.message: 'Client was registered successfully',
+                Fields.message: f'You was registered successfully in account {account.name}.',
                 Fields.payload: account.payload,
             }
 
@@ -55,6 +56,7 @@ class SetCookiesCommand(Command):
             tasks = [asyncio.create_task(self._send(client, output))
                      for client in clients if client.writer is not request.client.writer]
             await asyncio.gather(*tasks)
+            logger.debug(f"Client {request.client.full_address} has set_cookies done in {account.name}")
             return {
                 Fields.message: 'Cookies was set successfully',
             }

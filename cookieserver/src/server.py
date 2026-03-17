@@ -12,14 +12,10 @@ from cookieserver.src.client import Client
 from cookieserver.src.commands import COMMAND_REGISTRY
 from cookieserver.src.errors import HandleCommandError
 from cookieserver.src.request import Request
-from cookieserver.src.settings import KEYS_PATH
+from cookieserver.src.settings import KEYS_PATH, MAX_SIZE
 from cookieserver.src.storage import AccountStorage
 
 logger = logging.getLogger(__name__)
-# в каждом клиенте есть имя аккаунта - значит, де-факто, у нас всегда есть аккаунт
-# в аккаунте должен быть набор клиентов, при отключении получаем аккаунт по ключу
-# и удаляем клиента
-
 
 class Server:
 
@@ -43,6 +39,8 @@ class Server:
                 # читаем длину сообщения
                 length_bytes = await reader.readexactly(4)
                 length = int.from_bytes(length_bytes, "big")
+                if length > MAX_SIZE:
+                    raise HandleCommandError('Too big request')
                 # читаем тело
                 raw_data = await reader.readexactly(length)
                 if not raw_data:
@@ -55,7 +53,9 @@ class Server:
                     raw_data=raw_data,
                     client=client
                 )
-
+                logger.info(
+                    f"Client {client.full_address} successfully sent proper request to {request.account} with command {request.command}"
+                )
                 command_class = COMMAND_REGISTRY.get(request.command)
                 if not command_class:
                     raise HandleCommandError("Command does not exist")
@@ -72,7 +72,7 @@ class Server:
                 writer.write(length_prefix + encoded)  # сначала длина, потом данные
                 await writer.drain()
         except Exception as e:
-            logger.info(f"Error {e.__class__}: {e}")
+            logger.error(f"Error occurred {e.__class__}: {e}")
             error_response = {
                 Fields.result: False,
                 Fields.message: str(e),
@@ -90,19 +90,22 @@ class Server:
             await writer.wait_closed()
 
     async def start(self):
+        logger.info(f"Starting server on {self.host}:{self.port} ...")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(
             certfile=os.path.join(KEYS_PATH, "cert.pem"),
             keyfile=os.path.join(KEYS_PATH, "key.pem"),
         )
+        context.check_hostname = False
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.server = await asyncio.start_server(
             self._handle_client,
             host=self.host,
             port=self.port,
             backlog=100,
+            ssl=context,
         )
-        logger.info(f"Server started on {self.host}:{self.port}")
+        logger.info(f"Server listening on {self.host}:{self.port}")
         await self.server.serve_forever()
 
     async def stop(self):
@@ -118,11 +121,3 @@ class Server:
                 client.writer.close()
 
         logger.info("Server stopped")
-
-    def start_sync(self):
-        asyncio.run(self.start())
-
-    def stop_sync(self):
-        if self.server:
-            loop = self.server.get_loop()
-            loop.call_soon_threadsafe(self.server.close)

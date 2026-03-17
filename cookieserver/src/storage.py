@@ -8,6 +8,10 @@ from cookieserver.src.client import Client
 from cookieserver.src.errors import StorageError
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT, SRC_PATH
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class Account:
 
@@ -23,7 +27,7 @@ class Account:
         if payload == self.payload:
             raise StorageError('Payload is same, set is failed')
         if time.time() - self.updated_at < COOKIE_TIMEOUT:
-            raise StorageError('You are setting too fast')
+            raise StorageError('This account has already set by other client recently. Try again later')
         self.updated_at = time.time()
         self.payload = payload
         self.write_file()

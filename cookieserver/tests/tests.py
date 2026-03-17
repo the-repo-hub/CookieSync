@@ -6,16 +6,14 @@ import ssl
 import threading
 import uuid
 from typing import Dict
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.server import Server
-from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_SERVER_PATH
-import time
-from functools import partial
+from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_SERVER_PATH, KEYS_PATH
 
 SERVER_ADDRESS = '127.0.0.1'
 SERVER_PORT = 52314
@@ -29,10 +27,13 @@ def cookies():
 async def server():
 
     server = Server(SERVER_ADDRESS, SERVER_PORT)
-    t = threading.Thread(target=server.start_sync)
+    t = threading.Thread(target=lambda: asyncio.run(server.start()), daemon=True)
     t.start()
+    while not server.server or not server.server.is_serving():
+        await asyncio.sleep(0.01)
     yield server
-    server.stop_sync()
+    loop = server.server.get_loop()
+    loop.call_soon_threadsafe(server.server.close)
     t.join()
 
 @pytest.fixture
@@ -85,12 +86,17 @@ class AsyncClient:
 
     async def connect(self, host, port):
         ssl_context = ssl.create_default_context()
+        ssl_context.load_verify_locations(cafile=os.path.join(KEYS_PATH, 'cert.pem'))
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
-        self.reader, self.writer = await asyncio.open_connection(host, port)
+        self.reader, self.writer = await asyncio.open_connection(
+            host,
+            port,
+            ssl=ssl_context,
+        )
         self.listen_task = asyncio.create_task(self.listen())
 
-    async def send_request(self, payload: Dict, timeout=10):
+    async def send_request(self, payload: Dict, timeout=5):
         request_id = str(uuid.uuid4())
         payload[Fields.request_id] = request_id
         encoded = json.dumps(payload).encode()

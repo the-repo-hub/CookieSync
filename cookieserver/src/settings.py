@@ -6,3 +6,4 @@ ACCOUNTS_PATH = os.path.join(COOKIE_SERVER_PATH, 'accounts')
 KEYS_PATH = os.path.join(COOKIE_SERVER_PATH, 'keys')
 COOKIE_TIMEOUT = 60
 ENCODING = 'utf-8'
+MAX_SIZE = 1024
