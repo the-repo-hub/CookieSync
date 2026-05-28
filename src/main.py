@@ -19,7 +19,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 
 from src.choiches import CookieFields
 from src.exceptions import NoIniFileError, NoIniOptionsError, InvalidIniFieldError, InvalidIniValueError, \
-    BrowserNotFoundError, BrowserNotInstalled
+    BrowserNotFoundError, BrowserNotInstalled, TelegramError
 from src.handlers import exception_run_handler
 from src.manager import MessageManager
 from src.settings import INI_PATH
@@ -230,6 +230,9 @@ class ResoBrowser(Firefox, metaclass=BrowserMeta):
                 # ошибка при интерпретации кукисов (невалидные, но показывает, что валидные)
                 return True
             if issubclass(exc_type, RemoteDisconnected):
+                # быстро закрыть браузер
+                return True
+            if issubclass(exc_type, IndexError):
                 # быстро закрыть браузер
                 return True
             raise exc_type(exc_val)
