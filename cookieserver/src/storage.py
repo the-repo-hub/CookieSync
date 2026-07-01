@@ -1,14 +1,16 @@
+import asyncio
 import json
+import logging
 import os
 import time
 from functools import cached_property
 from typing import Dict, List, Optional, Set
 
-from cookieserver.src.client import Client
+from websockets.asyncio.server import ServerConnection
+
 from cookieserver.src.errors import StorageError
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT, SRC_PATH
-import asyncio
-import logging
+from cookieserver.src.request import Request
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,9 @@ class Account:
 
 class AccountStorage:
 
-    def __init__(self, clients_by_accounts: Dict[str, Set[Client]]):
+    def __init__(self):
         self._accounts: Dict[str, Account] = {}
-        self.clients_by_account = clients_by_accounts
+        self.websockets_by_account: Dict[str, Set[ServerConnection]] = {}
         self._load_accounts()
 
     def _load_accounts(self) -> None:
@@ -100,6 +102,6 @@ class AccountStorage:
         # for client in clients:
         #     client.writer.close()
 
-    def set_cookies(self, account_name: str, payload: List[Dict]) -> None:
+    def set_cookies(self, account_name: str, request: Request) -> None:
         account = self.require_account(account_name)
-        account.set_payload(payload)
+        account.set_payload(request.payload)

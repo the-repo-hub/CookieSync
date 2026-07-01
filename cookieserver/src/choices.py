@@ -13,4 +13,4 @@ class Fields:
     result = 'result'
     message = 'message'
     payload = 'payload'
-    request_id = 'request_id'
+    uuid = 'uuid'

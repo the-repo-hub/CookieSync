@@ -2,25 +2,22 @@ from dataclasses import dataclass
 from typing import Dict
 
 from cookieserver.src.choices import Fields
-from cookieserver.src.client import Client
 from cookieserver.src.errors import HandleCommandError
 
 
 @dataclass
 class Request:
-    raw_data: Dict
-    client: Client
+    payload: Dict
 
     def __post_init__(self):
-        self.command = self.raw_data.get(Fields.command)
-        self.account = self.raw_data.get(Fields.account)
-        self.request_id = self.raw_data.get(Fields.request_id)
+        self.command = self.payload.get(Fields.command)
+        self.account = self.payload.get(Fields.account)
+        self.uuid = self.payload.get(Fields.uuid)
+        self.payload = self.payload.get(Fields.payload)
 
         if not self.command:
             raise HandleCommandError("No command specified")
         if not self.account:
             raise HandleCommandError("No account specified")
-        if not self.request_id:
-            raise HandleCommandError("No request_id specified")
-
-        self.payload = self.raw_data.get(Fields.payload)
+        if not self.uuid:
+            raise HandleCommandError("No uuid specified")
