@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "CookieSync Extension",
+  "version": "1.0",
+  "permissions": ["storage", "cookies", "webRequest"],
+  "host_permissions": ["*://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CookieSync",
+    "default_icon": "icon.ico"
+  },
+  "icons": {
+    "128": "icon.ico"
+  }
+}

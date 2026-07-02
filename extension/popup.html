@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 300px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #27ae60;
+            padding: 16px;
+            color: #333;
+        }
+
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            color: #27ae60;
+        }
+
+        .toggle-switch {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .toggle-switch input {
+            display: none;
+        }
+
+        .switch-slider {
+            width: 44px;
+            height: 24px;
+            background-color: #ccc;
+            border-radius: 12px;
+            position: relative;
+            transition: background-color 0.3s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .switch-slider::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background-color: white;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.3s;
+        }
+
+        .toggle-switch input:checked + .switch-slider {
+            background-color: #27ae60;
+        }
+
+        .toggle-switch input:checked + .switch-slider::after {
+            transform: translateX(20px);
+        }
+
+        .toggle-switch.disabled .switch-slider {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        label .required {
+            color: #e74c3c;
+        }
+
+        input[type="text"],
+        input[type="url"] {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus,
+        input[type="url"]:focus {
+            outline: none;
+            border-color: #27ae60;
+            box-shadow: 0 0 0 2px rgba(39, 174, 96, 0.1);
+        }
+
+        input.error {
+            border-color: #e74c3c;
+        }
+
+        input.error:focus {
+            box-shadow: 0 0 0 2px rgba(231, 76, 60, 0.1);
+        }
+
+        .error-message {
+            font-size: 11px;
+            color: #e74c3c;
+            margin-top: 4px;
+        }
+
+        .info-text {
+            font-size: 11px;
+            color: #999;
+            margin-top: 12px;
+            text-align: center;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🍪 CookieSync</h1>
+        </div>
+
+        <div class="form-group">
+            <label for="accountInput">Аккаунт <span class="required">*</span></label>
+            <input
+                type="text"
+                id="accountInput"
+                placeholder="Введите название аккаунта"
+                autocomplete="off"
+                required
+            />
+            <div class="error-message" id="accountError"></div>
+        </div>
+
+        <div class="form-group">
+            <label for="serverUrlInput">Сервер <span class="required">*</span></label>
+            <input
+                type="url"
+                id="serverUrlInput"
+                placeholder="wss://localhost:52314"
+                autocomplete="off"
+                required
+            />
+            <div class="error-message" id="serverError"></div>
+        </div>
+
+        <div class="form-group" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0;">
+            <label style="margin-bottom: 0;">Включить</label>
+            <div class="toggle-switch" id="toggleContainer">
+                <input type="checkbox" id="enableToggle">
+                <span class="switch-slider"></span>
+            </div>
+        </div>
+
+        <div class="info-text">
+            Расширение синхронизирует куки с сервером
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
