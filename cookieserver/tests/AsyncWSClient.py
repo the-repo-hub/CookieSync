@@ -26,6 +26,8 @@ class AsyncWSClient:
         # Сообщения, которые сервер прислал сам: broadcast, set cookies и т.д.
         self.server_messages: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
+        self.last_request_uuid: str | None = None
+
     async def connect(self, url: str):
         ssl_context = None
 
@@ -74,6 +76,7 @@ class AsyncWSClient:
             raise RuntimeError("WebSocket is not connected")
 
         request_uuid = str(uuid.uuid4())
+        self.last_request_uuid = request_uuid
 
         payload = {
             **payload,

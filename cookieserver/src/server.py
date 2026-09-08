@@ -6,7 +6,7 @@ import ssl
 from typing import Dict, Optional, Set
 
 import websockets
-from websockets.asyncio.server import ServerConnection
+from websockets.asyncio.server import Server as WSServer, ServerConnection
 
 from cookieserver.src.choices import Fields
 from cookieserver.src.commands import COMMAND_REGISTRY
@@ -27,7 +27,7 @@ class Server:
     def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
-        self.server: asyncio.AbstractServer | None = None
+        self.server: WSServer | None = None
         self.storage = AccountStorage()
         self._ws_accounts: Dict[ServerConnection, str] = {}
 
@@ -37,56 +37,11 @@ class Server:
     def _untrack_ws(self, websocket: ServerConnection) -> Optional[str]:
         return self._ws_accounts.pop(websocket, None)
 
-    async def _connection_processor(self, websocket: ServerConnection):
+    async def _connection_processor(self, websocket: ServerConnection) -> None:
         logger.info(f"Client connected: {websocket.remote_address}")
         try:
             async for message in websocket:
-                try:
-                    raw_data = json.loads(message)
-
-                    if raw_data.get(Fields.command) == 'ping':
-                        await websocket.send(json.dumps({
-                            Fields.command: 'pong',
-                            Fields.uuid: raw_data.get(Fields.uuid, '')
-                        }))
-                        continue
-
-                    request = Request(raw_data)
-                    logger.info(
-                        f"Client {websocket.remote_address} sent command "
-                        f"{request.command} to account {request.account}"
-                    )
-
-                    command_class = COMMAND_REGISTRY.get(request.command)
-                    if not command_class:
-                        raise HandleCommandError(f"Command '{request.command}' does not exist")
-
-                    response = await command_class().execute(
-                        storage=self.storage,
-                        request=request,
-                        websocket=websocket,
-                    )
-                    response.update({
-                        Fields.result: True,
-                        Fields.uuid: request.uuid
-                    })
-
-                    if request.command == 'register':
-                        self._track_ws(websocket, request.account)
-
-                    await websocket.send(json.dumps(response))
-
-                except Exception as e:
-                    logger.exception(f"Error processing message: {e}")
-                    uuid = ''
-                    if 'request' in dir() and request:
-                        uuid = getattr(request, 'uuid', '')
-                    error_response = {
-                        Fields.result: False,
-                        Fields.message: str(e),
-                        Fields.uuid: uuid,
-                    }
-                    await websocket.send(json.dumps(error_response))
+                await self._handle_message(websocket, message)
         finally:
             account_name = self._untrack_ws(websocket)
             if account_name:
@@ -98,7 +53,58 @@ class Server:
                     )
             logger.info(f"Client disconnected: {websocket.remote_address}")
 
-    async def start(self):
+    async def _handle_message(
+        self,
+        websocket: ServerConnection,
+        message: str,
+    ) -> None:
+        request_uuid = ''
+        try:
+            raw_data = json.loads(message)
+            request_uuid = raw_data.get(Fields.uuid, '')
+
+            if raw_data.get(Fields.command) == 'ping':
+                await websocket.send(json.dumps({
+                    Fields.command: 'pong',
+                    Fields.uuid: request_uuid,
+                }))
+                return
+
+            request = Request(raw_data)
+            logger.info(
+                f"Client {websocket.remote_address} sent command "
+                f"{request.command} to account {request.account}"
+            )
+
+            command_class = COMMAND_REGISTRY.get(request.command)
+            if not command_class:
+                raise HandleCommandError(f"Command '{request.command}' does not exist")
+
+            response = await command_class().execute(
+                storage=self.storage,
+                request=request,
+                websocket=websocket,
+            )
+            response.update({
+                Fields.result: True,
+                Fields.uuid: request.uuid
+            })
+
+            if request.command == 'register':
+                self._track_ws(websocket, request.account)
+
+            await websocket.send(json.dumps(response))
+
+        except Exception as e:
+            logger.exception(f"Error processing message: {e}")
+            error_response = {
+                Fields.result: False,
+                Fields.message: str(e),
+                Fields.uuid: request_uuid,
+            }
+            await websocket.send(json.dumps(error_response))
+
+    async def start(self) -> None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(
             certfile=os.path.join(KEYS_PATH, "cert.pem"),
@@ -115,7 +121,7 @@ class Server:
             ping_timeout=PING_TIMEOUT,
         )
 
-    async def stop(self):
+    async def stop(self) -> None:
         logger.info("Stopping server...")
 
         if not self.server:
