@@ -20,7 +20,7 @@ class Account:
     def __init__(self, name, payload):
         self.name = name
         self.payload = payload
-        self.updated_at = time.time()
+        self.updated_at = 0.0
         filename = f'{self.name}.json'
         self.full_path = os.path.join(ACCOUNTS_PATH, filename)
         self.lock = asyncio.Lock()
@@ -28,9 +28,13 @@ class Account:
     def set_payload(self, payload):
         if payload == self.payload:
             raise StorageError('Payload is same, set is failed')
-        if time.time() - self.updated_at < COOKIE_TIMEOUT:
-            raise StorageError('This account has already set by other client recently. Try again later')
-        self.updated_at = time.time()
+        now = time.time()
+        if now - self.updated_at < COOKIE_TIMEOUT:
+            remaining = int(COOKIE_TIMEOUT - (now - self.updated_at))
+            raise StorageError(
+                f'Rate limit: try again in {remaining}s'
+            )
+        self.updated_at = now
         self.payload = payload
         self.write_file()
 

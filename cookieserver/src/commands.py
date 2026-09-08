@@ -6,7 +6,6 @@ from typing import Dict, Type
 
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.request import Request
-from cookieserver.src.settings import ENCODING
 from cookieserver.src.storage import AccountStorage
 from websockets.asyncio.server import ServerConnection
 
@@ -33,9 +32,9 @@ class RegisterCookiesCommand(Command):
         account = storage.require_account(request.account)
         async with account.lock:
             storage.websockets_by_account.setdefault(account.name, set()).add(websocket)
-            websocket.logger.info(f"Client {websocket.remote_address} successfully registered in {account.name}")
+            logger.info(f"Client {websocket.remote_address} registered in account {account.name}")
             return {
-                Fields.message: f'You was registered successfully in account {account.name}.',
+                Fields.message: f'Registered successfully in account {account.name}.',
                 Fields.payload: account.payload,
             }
 
@@ -62,7 +61,6 @@ class SetCookiesCommand(Command):
 
     async def _send(self, websocket: ServerConnection, output: Dict):
         try:
-            encoded = json.dumps(output).encode(ENCODING)
-            await websocket.send(encoded)
+            await websocket.send(json.dumps(output))
         except Exception:
             pass
