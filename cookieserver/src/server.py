@@ -121,6 +121,10 @@ class Server:
             ping_timeout=PING_TIMEOUT,
         )
 
+    async def wait_closed(self) -> None:
+        if self.server:
+            await self.server.wait_closed()
+
     async def stop(self) -> None:
         logger.info("Stopping server...")
 

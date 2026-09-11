@@ -30,10 +30,19 @@ def main():
     args = parser.parse_args()
     srv = Server(args.host, args.port)
 
+    async def run():
+        await srv.start()
+        try:
+            await srv.wait_closed()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await srv.stop()
+
     try:
-        asyncio.run(srv.start())
+        asyncio.run(run())
     except KeyboardInterrupt:
-        asyncio.run(srv.stop())
+        pass
 
 if __name__ == "__main__":
     main()
