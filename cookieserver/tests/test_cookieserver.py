@@ -103,6 +103,17 @@ def not_storage_account(server):
 
 
 @pytest.fixture
+def other_account(server):
+    name = 'other_account'
+    if name in server.storage.get_all_accounts():
+        server.storage.remove_account(name)
+    server.storage.add_account(name)
+    yield name
+    if name in server.storage.get_all_accounts():
+        server.storage.remove_account(name)
+
+
+@pytest.fixture
 def account(server):
     test_account_name = 'test_account'
     if test_account_name in server.storage.get_all_accounts():
@@ -413,3 +424,49 @@ class TestCookieServer:
         response = await async_client.recv_server_message()
         assert response[Fields.result] is False
         assert omitted in response[Fields.message]
+
+    @pytest.mark.asyncio
+    async def test_double_register_same_connection_single_entry(
+        self, server, account, async_client,
+    ):
+        """Повторный register на тот же аккаунт не должен дублировать клиента в сете."""
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(register_payload(account))
+        assert len(server.storage.websockets_by_account.get(account)) == 1
+
+    @pytest.mark.asyncio
+    async def test_re_register_moves_client_between_accounts(
+        self, server, account, other_account, async_client,
+    ):
+        """Повторный register на другой аккаунт убирает клиента из старого аккаунта."""
+        first = await async_client.send_request(register_payload(account))
+        assert first[Fields.result] is True
+        assert len(server.storage.websockets_by_account.get(account)) == 1
+
+        second = await async_client.send_request(register_payload(other_account))
+        assert second[Fields.result] is True
+        assert not server.storage.websockets_by_account.get(account)
+        assert len(server.storage.websockets_by_account.get(other_account)) == 1
+
+        await async_client.close()
+        await self.wait_until(lambda: not server.storage.websockets_by_account.get(other_account))
+        assert not server.storage._ws_accounts
+
+    @pytest.mark.asyncio
+    async def test_set_isolated_between_accounts(
+        self, server, cookies_not_sample, account, other_account, async_client, second_client,
+    ):
+        """set в одном аккаунте не рассылается и не пишется в другой аккаунт."""
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(other_account))
+
+        fake_set_payload = make_fake()
+        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
+            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.result] is True
+
+        # клиент другого аккаунта не получает рассылку
+        with pytest.raises(TimeoutError):
+            await second_client.recv_server_message(timeout=0.2)
+        # и куки не записались в другой аккаунт
+        assert server.storage.get_account(other_account).payload != cookies_not_sample

@@ -433,6 +433,27 @@ Self-signed certificates in tests need an explicit test SSL context.
 
 ---
 
+## Extension tests
+
+Pure client logic (domain normalization, domain matching, cookie field picking, cookie keys)
+lives in `extension/logic.js` and is covered by Node's built-in test runner.
+
+Run:
+
+```bash
+node --test
+```
+
+Rules:
+
+* `logic.js` must expose pure functions plus a conditional `module.exports` for Node;
+  in the extension it is loaded via `importScripts` in the MV3 service worker
+  (`background.js`) or as a `background.scripts` / popup `<script>` entry.
+* Keep browser-specific API usage out of `logic.js`.
+* Use `node:test` + `node:assert/strict`. Do not add npm dependencies for JS tests.
+
+---
+
 # Browser extension
 
 Main logic must live in background code.

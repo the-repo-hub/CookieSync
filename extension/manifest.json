@@ -3,10 +3,12 @@
   "name": "CookieSync Extension",
   "version": "1.0",
   "description": "Синхронизация куки между браузерами через WebSocket сервер",
+  "minimum_chrome_version": "121",
   "permissions": ["storage", "cookies", "alarms"],
   "host_permissions": ["*://*/*"],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": ["browser-polyfill.min.js", "logic.js", "background.js"]
   },
   "action": {
     "default_popup": "popup.html",

@@ -1,5 +1,3 @@
-const api = (typeof browser !== 'undefined' && browser.storage) ? browser : chrome;
-
 const accountInput = document.getElementById('accountInput');
 const serverUrlInput = document.getElementById('serverUrlInput');
 const cookieDomainInput = document.getElementById('cookieDomainInput');
@@ -116,7 +114,7 @@ function updateStatusDisplay(connected, enabled, phase, detail, error) {
 }
 
 async function loadSettings() {
-    const settings = await api.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain', 'probeUrl']);
+    const settings = await browser.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain', 'probeUrl']);
     accountInput.value = settings.account || '';
     serverUrlInput.value = settings.serverUrl || 'wss://localhost:52314';
     const rawDomains = settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain;
@@ -127,7 +125,7 @@ async function loadSettings() {
     setFieldsDisabled(enableToggle.checked);
 
     try {
-        const status = await api.runtime.sendMessage({ type: 'getStatus' });
+        const status = await browser.runtime.sendMessage({ type: 'getStatus' });
         updateStatusDisplay(status.connected, status.enabled, status.phase, status.detail, status.error);
     } catch (e) {
         updateStatusDisplay(false, false, 'error', 'Нет ответа от фонового скрипта');
@@ -152,9 +150,9 @@ async function saveSettings() {
         enabled: enableToggle.checked
     };
 
-    await api.storage.local.set(settings);
+    await browser.storage.local.set(settings);
 
-    api.runtime.sendMessage({
+    browser.runtime.sendMessage({
         type: 'settingsChanged',
         settings: settings
     }).catch(() => {});
@@ -188,9 +186,9 @@ toggleContainer.addEventListener('click', function (e) {
 });
 
 // Listen for status updates from background
-api.runtime.onMessage.addListener((message) => {
+browser.runtime.onMessage.addListener((message) => {
     if (message.type === 'statusUpdate') {
-        api.runtime.sendMessage({ type: 'getStatus' }).then((status) => {
+        browser.runtime.sendMessage({ type: 'getStatus' }).then((status) => {
             updateStatusDisplay(status.connected, status.enabled, status.phase, status.detail, status.error);
         }).catch(() => {});
     }
