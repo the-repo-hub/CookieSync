@@ -254,7 +254,7 @@ Connections may disappear because of:
 * network failure;
 * server restart;
 * protocol failure;
-* heartbeat failure;
+* idle background worker termination;
 * background worker recreation.
 
 ---
@@ -452,7 +452,7 @@ background
    |
    +--> WebSocket
    +--> cookies API
-   +--> heartbeat
+   +--> keepalive (chrome.alarms)
    +--> reconnect
 ```
 
@@ -517,7 +517,7 @@ On toggle OFF:
 ```text
 stop synchronization
 close WebSocket
-stop heartbeat
+stop keepalive
 stop reconnect
 ```
 
@@ -556,7 +556,6 @@ Expected lifecycle:
 ```text
 connect
 register
-heartbeat
 many set/push messages
 reconnect if needed
 disconnect on toggle OFF
@@ -564,26 +563,37 @@ disconnect on toggle OFF
 
 ---
 
-## Heartbeat
+## Keepalive
 
 Manifest V3 background contexts must not be assumed to live forever with a silent WebSocket.
+The browser terminates the background JS context after ~30s of inactivity; the WebSocket object
+dies together with its context. There is no application-level heartbeat anymore.
 
-Use a lightweight heartbeat.
-
-Recommended interval:
-
-```text
-~20 seconds
-```
-
-Protocol:
+Use `chrome.alarms` to wake the background context periodically:
 
 ```text
-client -> ping
-server -> pong
+every ~30 seconds (periodInMinutes = 0.5)
 ```
 
-Heartbeat failure should close the socket and trigger reconnect.
+The alarm handler must:
+
+* return if the sync is disabled;
+* return if the socket is already open;
+* otherwise schedule a reconnect.
+
+Recommended alarm name:
+
+```text
+cookiesync-keepalive
+```
+
+Do not restart the background by sending `{command: 'ping'}` messages: timers and outgoing
+WebSocket frames do not keep a Manifest V3 service worker alive, and the `ping` command has
+been removed from the server protocol.
+
+Server-side dead-client detection is provided by the websockets library protocol ping
+(`ping_interval` / `ping_timeout` in `server_config.conf`) — it is independent of any
+application command.
 
 ---
 
