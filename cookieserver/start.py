@@ -2,6 +2,7 @@ import argparse
 import asyncio
 
 from cookieserver.src.server import Server
+from cookieserver.src.settings import HOST, PORT
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -11,8 +12,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Reso socket server for accounts"
     )
-    host = "0.0.0.0"
-    port = 52314
+    host = HOST
+    port = PORT
     parser.add_argument(
         "--host",
         type=str,

@@ -8,6 +8,7 @@ from typing import List
 
 from cookieserver.src.errors import StorageError
 from cookieserver.src.server import Server
+from cookieserver.src.settings import HOST, LOG_LEVEL, PORT
 from cookieserver.src.storage import AccountStorage
 
 
@@ -27,12 +28,12 @@ class RunServerCommand(BaseCommand):
     help = "Start the WebSocket cookie server"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("--host", type=str, default="0.0.0.0")
-        parser.add_argument("--port", type=int, default=52314)
+        parser.add_argument("--host", type=str, default=HOST)
+        parser.add_argument("--port", type=int, default=PORT)
         parser.add_argument("--no-tls", action="store_true", help="run without TLS (ws://)")
 
     def handle(self, args: argparse.Namespace) -> None:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
         server = Server(args.host, args.port, use_tls=not args.no_tls)
         try:
             asyncio.run(server.run())
