@@ -1,15 +1,14 @@
 const accountInput = document.getElementById('accountInput');
 const serverUrlInput = document.getElementById('serverUrlInput');
 const cookieDomainInput = document.getElementById('cookieDomainInput');
-const probeUrlInput = document.getElementById('probeUrlInput');
 const enableToggle = document.getElementById('enableToggle');
 const toggleContainer = document.getElementById('toggleContainer');
 const accountError = document.getElementById('accountError');
 const serverError = document.getElementById('serverError');
-const probeError = document.getElementById('probeError');
+const domainError = document.getElementById('domainError');
 const syncStatus = document.getElementById('syncStatus');
 
-const SETTINGS_FIELDS = [accountInput, serverUrlInput, cookieDomainInput, probeUrlInput];
+const SETTINGS_FIELDS = [accountInput, serverUrlInput, cookieDomainInput];
 
 function setFieldsDisabled(disabled) {
     SETTINGS_FIELDS.forEach(field => {
@@ -17,15 +16,11 @@ function setFieldsDisabled(disabled) {
     });
 }
 
-function isHttpUrl(value) {
-    return /^https?:\/\//i.test(value);
-}
-
 function validateInputs() {
     let isValid = true;
     accountError.textContent = '';
     serverError.textContent = '';
-    probeError.textContent = '';
+    domainError.textContent = '';
 
     if (!accountInput.value.trim()) {
         accountInput.classList.add('error');
@@ -43,16 +38,21 @@ function validateInputs() {
         serverUrlInput.classList.remove('error');
     }
 
-    if (!probeUrlInput.value.trim()) {
-        probeUrlInput.classList.add('error');
-        probeError.textContent = 'Обязательное поле';
-        isValid = false;
-    } else if (!isHttpUrl(probeUrlInput.value.trim())) {
-        probeUrlInput.classList.add('error');
-        probeError.textContent = 'Только http:// или https://';
+    if (!cookieDomainInput.value.trim()) {
+        cookieDomainInput.classList.add('error');
+        domainError.textContent = 'Обязательное поле';
         isValid = false;
     } else {
-        probeUrlInput.classList.remove('error');
+        cookieDomainInput.classList.remove('error');
+        const domains = cookieDomainInput.value
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+        if (!domains.length || domains.some(d => !/^\.?[a-zа-я0-9.-]+$/i.test(d))) {
+            cookieDomainInput.classList.add('error');
+            domainError.textContent = 'Формат: домен, через запятую (напр. .reso.ru)';
+            isValid = false;
+        }
     }
 
     return isValid;
@@ -114,12 +114,11 @@ function updateStatusDisplay(connected, enabled, phase, detail, error) {
 }
 
 async function loadSettings() {
-    const settings = await browser.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain', 'probeUrl']);
+    const settings = await browser.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain']);
     accountInput.value = settings.account || '';
     serverUrlInput.value = settings.serverUrl || 'wss://localhost:52314';
     const rawDomains = settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain;
     cookieDomainInput.value = Array.isArray(rawDomains) ? rawDomains.join(', ') : (rawDomains || '.reso.ru');
-    probeUrlInput.value = settings.probeUrl || 'https://reso.ru/';
     enableToggle.checked = settings.enabled === true;
     updateToggleState();
     setFieldsDisabled(enableToggle.checked);
@@ -146,7 +145,6 @@ async function saveSettings() {
         account: accountInput.value.trim(),
         serverUrl: serverUrlInput.value.trim(),
         cookieDomains: domains.length ? domains : ['.reso.ru'],
-        probeUrl: probeUrlInput.value.trim(),
         enabled: enableToggle.checked
     };
 
@@ -161,12 +159,10 @@ async function saveSettings() {
 // Event listeners
 accountInput.addEventListener('input', updateToggleState);
 serverUrlInput.addEventListener('input', updateToggleState);
-probeUrlInput.addEventListener('input', updateToggleState);
 
 accountInput.addEventListener('blur', saveSettings);
 serverUrlInput.addEventListener('blur', saveSettings);
 cookieDomainInput.addEventListener('blur', saveSettings);
-probeUrlInput.addEventListener('blur', saveSettings);
 
 enableToggle.addEventListener('change', function () {
     if (!validateInputs()) {

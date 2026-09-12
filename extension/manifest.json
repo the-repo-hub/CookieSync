@@ -10,6 +10,13 @@
     "service_worker": "background.js",
     "scripts": ["browser-polyfill.min.js", "logic.js", "background.js"]
   },
+  "content_scripts": [
+    {
+      "matches": ["*://office.reso.ru/*"],
+      "js": ["browser-polyfill.min.js", "authentication.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "CookieSync",

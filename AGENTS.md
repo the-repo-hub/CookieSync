@@ -779,21 +779,24 @@ Current intended debounce:
 
 ## Authentication hook
 
-Keep:
+Authentication is verified against the office.reso.ru session and is a hard
+gate: the client does not send `set` unless the user is confirmed signed in.
 
-```javascript
-function isAuthenticated() {
-    return true;
-}
-```
+Implementation requirements:
 
-as a placeholder.
-
-Do not remove it.
-
-Future authentication checks should be implemented there.
-
-Do not send `set` if authentication conditions fail.
+* the check lives in background code (`isAuthenticated()` in `background.js`);
+* the actual verdict comes from the content script `authentication.js` injected
+  into `office.reso.ru` pages, which reports the visibility of the РЕСО Офис
+  login dialog (`#clbkAuth_ASPxPopupControl1_loginTitle2`);
+* "authenticated" means the login dialog is **absent or hidden** (`display:none`,
+  no layout box) — the ASPx popup often stays in the DOM after login;
+* `isAuthenticated()` queries open `office.reso.ru` tabs via
+  `browser.tabs.query({url})` and `browser.tabs.sendMessage(...)`;
+* if no office.reso.ru tab is open, or none of them answers in time, treat the
+  user as **not authenticated** (block `set` with an explicit log);
+* do not use an HTTP fetch probe (`fetch(url)` + `response.ok`) — pages return
+  `200` even when logged out;
+* do not send `set` if authentication conditions fail.
 
 ---
 

@@ -1,12 +1,11 @@
 const DEFAULT_SERVER_URL = 'wss://localhost:52314';
 const DEFAULT_COOKIE_DOMAINS = ['.reso.ru'];
-const DEFAULT_PROBE_URL = 'https://reso.ru/';
 const RECONNECT_DELAY = 5000;
 const REQUEST_TIMEOUT = 10000;
 const SYNC_DEBOUNCE_MS = 1500;
 const REMOTE_CHANGE_TTL_MS = 2000;
-const PROBE_TIMEOUT_MS = 10000;
-const PROBE_CACHE_TTL_MS = 30000;
+const AUTH_CHECK_DOMAIN = 'office.reso.ru';
+const AUTH_CHECK_TIMEOUT_MS = 3000;
 const KEEPALIVE_ALARM = 'cookiesync-keepalive';
 const KEEPALIVE_PERIOD_MINUTES = 0.5;
 
@@ -20,7 +19,6 @@ let isEnabled = false;
 let currentAccount = '';
 let currentServerUrl = DEFAULT_SERVER_URL;
 let currentCookieDomains = [...DEFAULT_COOKIE_DOMAINS];
-let currentProbeUrl = DEFAULT_PROBE_URL;
 let reconnectTimeout = null;
 let syncDebounceTimer = null;
 
@@ -33,9 +31,6 @@ let lastError = '';
 
 // Список ожидаемых удалённых изменений куки: domain|path|name -> timestamp
 let expectedRemoteChanges = new Map();
-
-// Кэш результата auth-пробы, чтобы не долбить сайт каждую синхронизацию
-let authCache = { value: false, expiresAt: 0 };
 
 class CookieSyncClient {
     constructor() {
@@ -152,32 +147,60 @@ class CookieSyncClient {
 const client = new CookieSyncClient();
 
 async function isAuthenticated() {
-    const now = Date.now();
-    if (now < authCache.expiresAt) {
-        return authCache.value;
+    // Проверка выполняется content-script'ом на вкладках office.reso.ru:
+    // аутентифицирован, если окно входа «Добро пожаловать в РЕСО Офис» не показано.
+    if (!AUTH_CHECK_DOMAIN) {
+        return true;
     }
 
-    let authenticated = false;
-    const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-
+    let tabs = [];
     try {
-        const response = await fetch(currentProbeUrl || DEFAULT_PROBE_URL, {
-            credentials: 'include',
-            redirect: 'follow',
-            cache: 'no-store',
-            signal: controller.signal
-        });
-        authenticated = response.ok;
+        tabs = await browser.tabs.query({ url: [`*://${AUTH_CHECK_DOMAIN}/*`] });
     } catch (e) {
-        console.error('[CookieSync] Auth probe failed:', e);
-    } finally {
-        clearTimeout(abortTimer);
+        console.error('[CookieSync] Auth check: tabs.query failed:', e);
+        return false;
     }
 
-    authCache.value = authenticated;
-    authCache.expiresAt = now + PROBE_CACHE_TTL_MS;
-    return authenticated;
+    const aliveTabs = tabs.filter(tab => typeof tab.id === 'number' && !tab.discarded);
+    if (!aliveTabs.length) {
+        console.warn(`[CookieSync] Auth check: нет открытой вкладки ${AUTH_CHECK_DOMAIN} — вход не подтверждён, set не отправляем`);
+        return false;
+    }
+
+    let answered = 0;
+    for (const tab of aliveTabs) {
+        try {
+            const reply = await withTimeout(
+                browser.tabs.sendMessage(tab.id, { type: 'cookiesyncCheckAuth' }),
+                AUTH_CHECK_TIMEOUT_MS,
+            );
+            if (reply && typeof reply.authenticated === 'boolean') {
+                answered += 1;
+                if (reply.authenticated) {
+                    return true;
+                }
+            }
+        } catch (e) {
+            // вкладка ещё не загрузила content script — пробуем следующую
+        }
+    }
+
+    if (answered) {
+        return false;
+    }
+    console.warn(`[CookieSync] Auth check: ни одна вкладка ${AUTH_CHECK_DOMAIN} не ответила — вход не подтверждён`);
+    return false;
+}
+
+function withTimeout(promise, milliseconds) {
+    // В страницах/вкладках Chrome content script может "зависнуть"; ограничиваем ожидание.
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), milliseconds);
+        promise.then(
+            value => { clearTimeout(timer); resolve(value); },
+            () => { clearTimeout(timer); resolve(undefined); },
+        );
+    });
 }
 
 function scheduleCookieSync() {
@@ -197,7 +220,7 @@ async function syncCookiesToServer() {
     }
 
     if (!(await isAuthenticated())) {
-        console.warn('[CookieSync] Cookie sync skipped: auth probe failed or not authenticated');
+        console.warn('[CookieSync] Cookie sync skipped: вход в РЕСО Офис не подтверждён');
         return;
     }
 
@@ -307,12 +330,19 @@ socket.addEventListener('close', (event) => {
             }
         });
 
-        socket.addEventListener('error', (event) => {
-            const reason = (event && event.error && event.error.message)
-                ? event.error.message
-                : `не удалось подключиться к ${currentServerUrl}`;
-            console.error('[CookieSync] Socket error:', reason);
-            setSyncPhase('error', 'Ошибка соединения: ' + reason);
+        socket.addEventListener('error', () => {
+            const failedSocket = socket;
+            setSyncPhase('error', `Ошибка соединения: не удалось подключиться к ${currentServerUrl}`);
+            console.error(`[CookieSync] Socket error: не удалось подключиться к ${currentServerUrl}`);
+
+            diagnoseConnection(currentServerUrl).then((diagnosis) => {
+                if (diagnosis) {
+                    console.warn('[CookieSync] Socket diagnosis:', diagnosis);
+                    if (socket === failedSocket && syncPhase === 'error') {
+                        setSyncPhase('error', `Ошибка соединения: ${diagnosis}`);
+                    }
+                }
+            });
         });
     } catch (e) {
         console.error('[CookieSync] Connection error:', e);
@@ -334,6 +364,39 @@ function disconnect() {
         socket = null;
     }
     setSyncPhase('idle', '');
+}
+
+async function diagnoseConnection(url) {
+    // WebSocket API не раскрывает причину обрыва (event.error пуст/нечитаем),
+    // поэтому пробуем тот же host:port простым HTTP-запросом и по результату
+    // строим осмысленное объяснение для пользователя.
+    try {
+        const wsUrl = new URL(url);
+        const probeScheme = wsUrl.protocol === 'wss:' ? 'https' : 'http';
+        const probeUrl = `${probeScheme}//${wsUrl.host}/`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+        try {
+            const response = await fetch(probeUrl, {
+                cache: 'no-store',
+                redirect: 'manual',
+                signal: controller.signal,
+            });
+            clearTimeout(timer);
+            return `На ${wsUrl.host} отвечает HTTP-сервер (код ${response.status}); WebSocket не может подключиться — возможно, сервер запущен без TLS (${'ws'} вместо ${'wss'}) либо порт занят другой службой`;
+        } catch (fetchErr) {
+            clearTimeout(timer);
+            if (fetchErr && fetchErr.name === 'AbortError') {
+                return `${wsUrl.host} не отвечает (таймаут) — проверьте запущен ли сервер, правила сети и файрвол`;
+            }
+            if (wsUrl.protocol === 'wss:') {
+                return `Сертификат TLS недоверенный — браузер отклоняет wss://. Для самоподписанного сертификата запустите сервер с --no-tls и используйте ws://, либо добавьте сертификат в доверенные`;
+            }
+            return `Сервер на ${wsUrl.host} не отвечает — проверьте, запущен ли он и правильный ли порт (по умолчанию: 52314)`;
+        }
+    } catch (urlErr) {
+        return `Некорректный адрес сервера: ${url}`;
+    }
 }
 
 function scheduleReconnect() {
@@ -366,7 +429,7 @@ function setSyncPhase(phase, detail) {
 }
 
 function handleSettingsChange(settings) {
-    const { account, serverUrl: newServerUrl, enabled, cookieDomains, cookieDomain, probeUrl } = settings;
+    const { account, serverUrl: newServerUrl, enabled, cookieDomains, cookieDomain } = settings;
 
     if (account !== undefined) {
         currentAccount = account;
@@ -374,9 +437,6 @@ function handleSettingsChange(settings) {
     if (cookieDomains !== undefined || cookieDomain !== undefined) {
         const parsed = parseDomains(cookieDomains !== undefined ? cookieDomains : cookieDomain);
         currentCookieDomains = parsed.length ? parsed : [...DEFAULT_COOKIE_DOMAINS];
-    }
-    if (probeUrl !== undefined) {
-        currentProbeUrl = probeUrl || DEFAULT_PROBE_URL;
     }
     if (newServerUrl !== undefined && newServerUrl !== currentServerUrl) {
         currentServerUrl = newServerUrl;
@@ -399,7 +459,7 @@ function handleSettingsChange(settings) {
 
 async function loadSettings() {
     const settings = await browser.storage.local.get(
-        ['enabled', 'account', 'serverUrl', 'cookieDomains', 'cookieDomain', 'probeUrl'],
+        ['enabled', 'account', 'serverUrl', 'cookieDomains', 'cookieDomain'],
     );
     const parsed = parseDomains(
         settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain
@@ -408,14 +468,12 @@ async function loadSettings() {
     currentAccount = settings.account || '';
     currentServerUrl = settings.serverUrl || DEFAULT_SERVER_URL;
     currentCookieDomains = parsed.length ? parsed : [...DEFAULT_COOKIE_DOMAINS];
-    currentProbeUrl = settings.probeUrl || DEFAULT_PROBE_URL;
 
     console.log('[CookieSync] Loaded settings:', {
         enabled: isEnabled,
         account: currentAccount,
         serverUrl: currentServerUrl,
-        cookieDomains: currentCookieDomains,
-        probeUrl: currentProbeUrl
+        cookieDomains: currentCookieDomains
     });
 
     return settings;
@@ -432,7 +490,6 @@ browser.runtime.onMessage.addListener((request, sender) => {
             account: currentAccount,
             serverUrl: currentServerUrl,
             cookieDomains: currentCookieDomains,
-            probeUrl: currentProbeUrl,
             error: lastError
         });
     }
@@ -474,9 +531,6 @@ browser.storage.onChanged.addListener((changes, areaName) => {
         newSettings.cookieDomains = changes.cookieDomains.newValue;
     } else if (changes.cookieDomain) {
         newSettings.cookieDomain = changes.cookieDomain.newValue;
-    }
-    if (changes.probeUrl) {
-        newSettings.probeUrl = changes.probeUrl.newValue || DEFAULT_PROBE_URL;
     }
     handleSettingsChange(newSettings);
 });
