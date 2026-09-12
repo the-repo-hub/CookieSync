@@ -74,6 +74,11 @@ class AccountStorage:
             ws_set.discard(websocket)
 
     def _load_accounts(self) -> None:
+        if not os.path.isdir(ACCOUNTS_PATH):
+            logger.warning(
+                f"Accounts directory {ACCOUNTS_PATH} does not exist, starting empty"
+            )
+            return
         for filename in os.listdir(ACCOUNTS_PATH):
             if not filename.endswith(".json"):
                 continue

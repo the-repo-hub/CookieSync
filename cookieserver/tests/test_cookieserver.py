@@ -500,6 +500,94 @@ class TestCookieServer:
         assert server.storage.get_account(other_account).payload != cookies_not_sample
 
     @pytest.mark.asyncio
+    async def test_late_join_register_returns_current_cookies(
+        self, server, cookies_not_sample, account, async_client, second_client, third_client,
+    ):
+        """Новый клиент при регистрации получает уже сохранённые куки аккаунта."""
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
+
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.result] is True
+
+        # третий клиент подключается ПОСЛЕ set, но в ответе register получает текущие куки
+        late = await third_client.send_request(register_payload(account))
+        assert late[Fields.result] is True
+        assert late[Fields.uuid] == third_client.last_request_uuid
+        assert late[Fields.payload] == cookies_not_sample
+
+    @pytest.mark.asyncio
+    async def test_malformed_messages_do_not_kill_connection(
+        self, server, account, async_client,
+    ):
+        """Битый JSON и JSON-не-объект дают result:false с uuid='' и не рвут соединение."""
+        await async_client.send_raw('this is not json')
+        response = await async_client.recv_server_message()
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == ''
+        assert response[Fields.message] == 'Invalid message format'
+
+        await async_client.send_raw('[1, 2, 3]')
+        response = await async_client.recv_server_message()
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == ''
+
+        # соединение живо и отвечает на нормальные запросы
+        ok = await async_client.send_request(register_payload(account))
+        assert ok[Fields.result] is True
+
+    @pytest.mark.asyncio
+    async def test_set_unknown_account_returns_false(
+        self, server, cookies_not_sample, async_client,
+    ):
+        """set в несуществующий аккаунт → result:false, соединение не падает."""
+        missing = 'definitely_not_there_account'
+        assert server.storage.get_account(missing) is None
+
+        response = await async_client.send_request(set_payload(missing, cookies_not_sample))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert 'does not exist' in response[Fields.message]
+
+    @pytest.mark.asyncio
+    async def test_server_push_has_command_set_and_no_uuid(
+        self, server, cookies_not_sample, account, async_client, second_client,
+    ):
+        """Server push: command='set', payload=cookies и НИКАКОГО uuid (протокол)."""
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
+
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.result] is True
+
+        push = await second_client.recv_server_message()
+        assert push[Fields.command] == Commands.set
+        assert push[Fields.payload] == cookies_not_sample
+        assert Fields.uuid not in push
+
+    def test_storage_skips_corrupt_account_file(self, tmp_path, monkeypatch):
+        """Unreadable/битый JSON в accounts/ пропускается, остальные аккаунты грузятся."""
+        accounts_dir = tmp_path / 'accounts'
+        accounts_dir.mkdir()
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+
+        (accounts_dir / 'corrupt.json').write_text('{not valid json')
+        (accounts_dir / 'ok_account.json').write_text('[]')
+
+        storage = AccountStorage()
+        assert storage.get_account('corrupt') is None
+        assert storage.get_account('ok_account') is not None
+        assert storage.get_all_accounts() == ['ok_account']
+
+    def test_storage_missing_accounts_dir_does_not_crash(self, tmp_path, monkeypatch):
+        """Сервер стартует даже если каталог accounts/ не существует."""
+        missing = tmp_path / 'no_such_accounts_dir'
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(missing))
+
+        storage = AccountStorage()
+        assert storage.get_all_accounts() == []
+
+    @pytest.mark.asyncio
     async def test_tls_client_on_plain_server_logs_concisely(
         self, plain_server, caplog,
     ):

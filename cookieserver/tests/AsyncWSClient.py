@@ -103,6 +103,16 @@ class AsyncWSClient:
         finally:
             self._pending.pop(request_uuid, None)
 
+    async def send_raw(self, text: str) -> None:
+        """Отправляет произвольный (возможно, битый) текст прямо в сокет.
+
+        Ответ на битый запрос сервер шлёт с пустым uuid, поэтому он не
+        коррелируется через _pending, а попадает в server_messages.
+        """
+        if self.ws is None:
+            raise RuntimeError("WebSocket is not connected")
+        await self.ws.send(text)
+
     async def recv_server_message(self, timeout: float = 5) -> dict[str, Any]:
         return await asyncio.wait_for(
             self.server_messages.get(),

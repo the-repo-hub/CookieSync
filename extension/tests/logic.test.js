@@ -149,3 +149,59 @@ test('remote change: маркер одноразовый и протухает �
     assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 7000), true);
     assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 7001), false);
 });
+
+test('cookieKey: разные path и name дают разные ключи', () => {
+    assert.notEqual(
+        cookieKey({ domain: 'reso.ru', name: 's', path: '/' }),
+        cookieKey({ domain: 'reso.ru', name: 's', path: '/x' })
+    );
+    assert.notEqual(
+        cookieKey({ domain: 'reso.ru', name: 's', path: '/' }),
+        cookieKey({ domain: 'reso.ru', name: 'other', path: '/' })
+    );
+    // отсутствие path → дефолтный '/', один и тот же ключ
+    assert.equal(
+        cookieKey({ domain: 'reso.ru', name: 's' }),
+        cookieKey({ domain: 'reso.ru', name: 's', path: '/' })
+    );
+    // host-only (без domain): пустой домен не коллизирует с реальным
+    assert.notEqual(
+        cookieKey({ name: 's', path: '/' }),
+        cookieKey({ domain: 'reso.ru', name: 's', path: '/' })
+    );
+});
+
+test('isCookieForSyncDomain: целевой домен с точкой (.reso.ru)', () => {
+    const domains = ['.reso.ru'];
+
+    assert.equal(isCookieForSyncDomain({ domain: '.reso.ru', name: 'a' }, domains), true);
+    assert.equal(isCookieForSyncDomain({ domain: 'reso.ru', name: 'a' }, domains), true);
+    assert.equal(isCookieForSyncDomain({ domain: 'www.reso.ru', name: 'a' }, domains), true);
+    assert.equal(isCookieForSyncDomain({ domain: 'sub.reso.ru', name: 'a' }, domains), true);
+    // злой сабстринг-матчинг не должен сработать
+    assert.equal(isCookieForSyncDomain({ domain: 'evilreso.ru', name: 'a' }, domains), false);
+    assert.equal(isCookieForSyncDomain({ domain: 'notreso.ru', name: 'a' }, domains), false);
+});
+
+test('remote change: границы TTL (now === at и ttl = 0)', () => {
+    const expected = new Map();
+    remarkExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 1000);
+    // ровно в момент пометки маркер активен (0 < ttlMs)
+    assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 1000), true);
+
+    // ttl=0: даже при now === at маркер уже мёртв
+    remarkExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 2000);
+    assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 0, 2000), false);
+});
+
+test('remote change: повторный remark освежает TTL, но маркер остаётся одноразовым', () => {
+    const expected = new Map();
+    remarkExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 1000);
+    // другой регистр — тот же самый ключ
+    remarkExpectedRemoteChange(expected, { domain: 'RESO.RU', name: 's' }, 3000);
+
+    // старый маркер (1000) истёк, свежий (3000) живёт
+    assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 3500), true);
+    // удалён после первого потребления
+    assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 3501), false);
+});
