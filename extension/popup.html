@@ -10,7 +10,7 @@
         }
 
         body {
-            width: 300px;
+            width: 320px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             background: #27ae60;
             padding: 16px;
@@ -34,6 +34,34 @@
         .header h1 {
             font-size: 18px;
             color: #27ae60;
+        }
+
+        .sync-status {
+            font-size: 12px;
+            margin-top: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .sync-status.connected {
+            color: #155724;
+        }
+
+        .sync-status.active {
+            color: #856404;
+        }
+
+        .sync-status.disconnected {
+            color: #721c24;
+        }
+
+        .sync-status.error {
+            color: #c0392b;
+        }
+
+        .sync-status.disabled {
+            color: #383d41;
         }
 
         .toggle-switch {
@@ -144,7 +172,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🍪 CookieSync</h1>
+            <h1>CookieSync</h1>
         </div>
 
         <div class="form-group">
@@ -171,16 +199,40 @@
             <div class="error-message" id="serverError"></div>
         </div>
 
-        <div class="form-group" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0;">
-            <label style="margin-bottom: 0;">Включить</label>
-            <div class="toggle-switch" id="toggleContainer">
-                <input type="checkbox" id="enableToggle">
-                <span class="switch-slider"></span>
-            </div>
+        <div class="form-group">
+            <label for="cookieDomainInput">Домены куки</label>
+            <input
+                type="text"
+                id="cookieDomainInput"
+                placeholder=".reso.ru, .example.com"
+                autocomplete="off"
+            />
         </div>
 
+        <div class="form-group">
+            <label for="probeUrlInput">URL проверки входа <span class="required">*</span></label>
+            <input
+                type="url"
+                id="probeUrlInput"
+                placeholder="https://reso.ru/"
+                autocomplete="off"
+                required
+            />
+            <div class="error-message" id="probeError"></div>
+        </div>
+
+        <div class="form-group" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0;">
+            <label style="margin-bottom: 0;">Включить</label>
+            <label class="toggle-switch" id="toggleContainer" for="enableToggle">
+                <input type="checkbox" id="enableToggle">
+                <span class="switch-slider"></span>
+            </label>
+        </div>
+
+        <div class="sync-status" id="syncStatus"></div>
+
         <div class="info-text">
-            Расширение синхронизирует куки с сервером
+            Синхронизация куки с сервером
         </div>
     </div>
 

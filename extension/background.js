@@ -1,19 +1,48 @@
 const DEFAULT_SERVER_URL = 'wss://localhost:52314';
+const DEFAULT_COOKIE_DOMAINS = ['.reso.ru'];
+const DEFAULT_PROBE_URL = 'https://reso.ru/';
 const RECONNECT_DELAY = 5000;
+const REQUEST_TIMEOUT = 10000;
+const SYNC_DEBOUNCE_MS = 1500;
+const REMOTE_CHANGE_TTL_MS = 2000;
+const PROBE_TIMEOUT_MS = 10000;
+const PROBE_CACHE_TTL_MS = 30000;
+const KEEPALIVE_ALARM = 'cookiesync-keepalive';
+const KEEPALIVE_PERIOD_MINUTES = 0.5;
+
+const api = (typeof browser !== 'undefined' && browser.storage) ? browser : chrome;
 
 let socket = null;
 let isEnabled = false;
 let currentAccount = '';
-let serverUrl = DEFAULT_SERVER_URL;
+let currentServerUrl = DEFAULT_SERVER_URL;
+let currentCookieDomains = [...DEFAULT_COOKIE_DOMAINS];
+let currentProbeUrl = DEFAULT_PROBE_URL;
 let reconnectTimeout = null;
+let syncDebounceTimer = null;
+
+// Текущий статус синхронизации: idle | connecting | connected | registering | online | disconnected | error
+let syncPhase = 'idle';
+let syncDetail = '';
+
+// Последняя явная ошибка (показывается в popup, сбрасывается при успешном онлайн)
+let lastError = '';
+
+// Список ожидаемых удалённых изменений куки: domain|path|name -> timestamp
+let expectedRemoteChanges = new Map();
+
+// Кэш результата auth-пробы, чтобы не долбить сайт каждую синхронизацию
+let authCache = { value: false, expiresAt: 0 };
 
 class CookieSyncClient {
     constructor() {
-        this.requestId = 0;
         this.pendingRequests = new Map();
     }
 
     generateUuid() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
             const r = Math.random() * 16 | 0;
             const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -46,7 +75,7 @@ class CookieSyncClient {
                 timeout: setTimeout(() => {
                     this.pendingRequests.delete(uuid);
                     reject(new Error('Request timeout'));
-                }, 10000)
+                }, REQUEST_TIMEOUT)
             });
 
             try {
@@ -69,68 +98,283 @@ class CookieSyncClient {
             }
 
             if (uuid && this.pendingRequests.has(uuid)) {
-                const { resolve, reject, timeout } = this.pendingRequests.get(uuid);
-                clearTimeout(timeout);
+                const pending = this.pendingRequests.get(uuid);
+                clearTimeout(pending.timeout);
                 this.pendingRequests.delete(uuid);
 
                 if (result) {
-                    resolve(payload);
-                    this.handleSetCookies(payload);
+                    pending.resolve(payload);
+                    if (payload) {
+                        this.handleSetCookies(payload);
+                    }
                 } else {
-                    reject(new Error(message || 'Request failed'));
+                    pending.reject(new Error(message || 'Request failed'));
                 }
             }
         } catch (e) {
-            console.error('Error parsing message:', e);
+            console.error('[CookieSync] Error parsing message:', e);
         }
     }
 
     handleSetCookies(payload) {
-        if (!payload || typeof payload !== 'object') {
+        if (!Array.isArray(payload)) {
             return;
         }
 
-        Object.entries(payload).forEach(([name, value]) => {
-            chrome.cookies.set({
-                url: 'http://localhost',
-                name,
-                value: String(value),
-                expirationDate: Math.floor(Date.now() / 1000) + 86400 * 365
+        const promises = payload
+            .filter(cookie => cookie && cookie.name)
+            .map(cookie => {
+                remarkExpectedRemoteChange(cookie);
+                return this.setRemoteCookie(cookie);
+            });
+
+        Promise.all(promises).then(() => {
+            notifyStatusUpdate();
+        });
+    }
+
+    setRemoteCookie(cookie) {
+        return new Promise((resolve) => {
+            const fallbackDomain = (currentCookieDomains[0] || DEFAULT_COOKIE_DOMAINS[0]);
+            const domain = (cookie.domain || fallbackDomain).replace(/^\./, '');
+            const url = `${cookie.secure ? 'https' : 'http'}://${domain}${cookie.path || '/'}`;
+            const details = {
+                url,
+                name: cookie.name,
+                value: String(cookie.value !== undefined ? cookie.value : '')
+            };
+
+            if (cookie.domain) {
+                details.domain = cookie.domain;
+            }
+            if (cookie.path) {
+                details.path = cookie.path;
+            }
+            if (cookie.secure !== undefined) {
+                details.secure = cookie.secure;
+            }
+            if (cookie.httpOnly !== undefined) {
+                details.httpOnly = cookie.httpOnly;
+            }
+            if (cookie.sameSite) {
+                details.sameSite = cookie.sameSite;
+            }
+            if (cookie.expirationDate !== undefined) {
+                details.expirationDate = cookie.expirationDate;
+            }
+
+            api.cookies.set(details, (result) => {
+                if (api.runtime.lastError) {
+                    console.error(`[CookieSync] Failed to set cookie "${cookie.name}":`, api.runtime.lastError.message);
+                }
+                resolve(result);
             });
         });
-
-        chrome.runtime.sendMessage({
-            type: 'statusUpdate'
-        }).catch(() => {});
     }
 }
 
 const client = new CookieSyncClient();
+
+function normalizeDomain(domain) {
+    return String(domain || '').replace(/^\./, '').toLowerCase();
+}
+
+function parseDomains(value) {
+    if (Array.isArray(value)) {
+        return value.map(String).map(s => s.trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    return [];
+}
+
+function isCookieForSyncDomain(cookie) {
+    const domain = normalizeDomain(cookie && cookie.domain);
+    if (!domain) {
+        return false;
+    }
+    return currentCookieDomains.some((raw) => {
+        const target = normalizeDomain(raw);
+        return domain === target || domain.endsWith('.' + target);
+    });
+}
+
+function cookieKey(cookie) {
+    return `${cookie.domain}|${cookie.path || '/'}|${cookie.name}`;
+}
+
+function remarkExpectedRemoteChange(cookie) {
+    expectedRemoteChanges.set(cookieKey(cookie), Date.now());
+}
+
+function isExpectedRemoteChange(cookie) {
+    const key = cookieKey(cookie);
+    const at = expectedRemoteChanges.get(key);
+    if (at !== undefined && Date.now() - at < REMOTE_CHANGE_TTL_MS) {
+        expectedRemoteChanges.delete(key);
+        return true;
+    }
+    return false;
+}
+
+function pickCookieFields(cookie) {
+    const fields = {
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path
+    };
+
+    if (cookie.secure !== undefined) {
+        fields.secure = cookie.secure;
+    }
+    if (cookie.httpOnly !== undefined) {
+        fields.httpOnly = cookie.httpOnly;
+    }
+    if (cookie.sameSite !== undefined) {
+        fields.sameSite = cookie.sameSite;
+    }
+    if (cookie.expirationDate !== undefined) {
+        fields.expirationDate = cookie.expirationDate;
+    }
+    if (cookie.hostOnly !== undefined) {
+        fields.hostOnly = cookie.hostOnly;
+    }
+    return fields;
+}
+
+async function isAuthenticated() {
+    const now = Date.now();
+    if (now < authCache.expiresAt) {
+        return authCache.value;
+    }
+
+    let authenticated = false;
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(currentProbeUrl || DEFAULT_PROBE_URL, {
+            credentials: 'include',
+            redirect: 'follow',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        authenticated = response.ok;
+    } catch (e) {
+        console.error('[CookieSync] Auth probe failed:', e);
+    } finally {
+        clearTimeout(abortTimer);
+    }
+
+    authCache.value = authenticated;
+    authCache.expiresAt = now + PROBE_CACHE_TTL_MS;
+    return authenticated;
+}
+
+function scheduleCookieSync() {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = setTimeout(() => {
+        syncDebounceTimer = null;
+        syncCookiesToServer();
+    }, SYNC_DEBOUNCE_MS);
+}
+
+async function syncCookiesToServer() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+    }
+    if (!currentAccount) {
+        return;
+    }
+
+    if (!(await isAuthenticated())) {
+        console.warn('[CookieSync] Cookie sync skipped: auth probe failed or not authenticated');
+        return;
+    }
+
+    const queries = currentCookieDomains.map(raw => api.cookies.getAll({ domain: normalizeDomain(raw) }));
+    const results = await Promise.all(queries);
+
+    const seen = new Set();
+    const cookies = [];
+    for (const list of results) {
+        for (const cookie of list) {
+            const key = cookieKey(cookie);
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            cookies.push(cookie);
+        }
+    }
+
+    const payload = cookies
+        .filter(isCookieForSyncDomain)
+        .map(pickCookieFields);
+
+    if (!payload.length) {
+        return;
+    }
+
+    try {
+        await client.sendCommand('set', currentAccount, payload);
+        console.log(`[CookieSync] Sent ${payload.length} cookies to server`);
+    } catch (e) {
+        console.error('[CookieSync] Failed to sync cookies to server:', e);
+    }
+}
+
+function ensureKeepalive() {
+    api.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MINUTES });
+}
+
+function stopKeepalive() {
+    api.alarms.clear(KEEPALIVE_ALARM);
+}
+
+api.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== KEEPALIVE_ALARM || !isEnabled) {
+        return;
+    }
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        return;
+    }
+    console.log('[CookieSync] Keepalive: connection lost, reconnecting');
+    scheduleReconnect();
+});
 
 function connect() {
     if (socket && socket.readyState === WebSocket.OPEN) {
         return;
     }
 
-    console.log('[CookieSync] Connecting to:', serverUrl);
+    console.log('[CookieSync] Connecting to:', currentServerUrl);
+    setSyncPhase('connecting', currentServerUrl);
 
     try {
-        socket = new WebSocket(serverUrl);
+        socket = new WebSocket(currentServerUrl);
 
         socket.addEventListener('open', async () => {
             console.log('[CookieSync] Connected');
             clearTimeout(reconnectTimeout);
+            reconnectTimeout = null;
+            setSyncPhase('connected', 'Соединение установлено');
 
             if (currentAccount) {
+                setSyncPhase('registering', currentAccount);
                 try {
                     await client.register(currentAccount);
                     console.log('[CookieSync] Registered as:', currentAccount);
+                    setSyncPhase('online', '');
                 } catch (e) {
                     console.error('[CookieSync] Registration failed:', e);
+                    setSyncPhase('error', 'Регистрация: ' + (e && e.message ? e.message : e));
                 }
+            } else {
+                setSyncPhase('online', '');
             }
-
-            notifyStatusUpdate();
         });
 
         socket.addEventListener('message', (event) => {
@@ -138,20 +382,34 @@ function connect() {
             client.handleMessage(event.data);
         });
 
-        socket.addEventListener('close', () => {
-            console.log('[CookieSync] Disconnected');
-            notifyStatusUpdate();
+socket.addEventListener('close', (event) => {
+            console.log('[CookieSync] Disconnected', event && event.code, event && event.reason);
             if (isEnabled) {
+                if (syncPhase !== 'error') {
+                    const code = event && event.code;
+                    const reason = (event && event.reason) ? `: ${event.reason}` : '';
+                    if (code && code !== 1000) {
+                        setSyncPhase('error', `Соединение разорвано (код ${code})${reason}`);
+                    } else {
+                        setSyncPhase('disconnected', 'Соединение потеряно' + (reason || ''));
+                    }
+                }
                 scheduleReconnect();
+            } else {
+                setSyncPhase('idle', '');
             }
         });
 
-        socket.addEventListener('error', (error) => {
-            console.error('[CookieSync] Socket error:', error);
-            notifyStatusUpdate();
+        socket.addEventListener('error', (event) => {
+            const reason = (event && event.error && event.error.message)
+                ? event.error.message
+                : `не удалось подключиться к ${currentServerUrl}`;
+            console.error('[CookieSync] Socket error:', reason);
+            setSyncPhase('error', 'Ошибка соединения: ' + reason);
         });
     } catch (e) {
         console.error('[CookieSync] Connection error:', e);
+        setSyncPhase('error', 'Ошибка соединения: ' + (e && e.message ? e.message : e));
         if (isEnabled) {
             scheduleReconnect();
         }
@@ -159,11 +417,16 @@ function connect() {
 }
 
 function disconnect() {
+    stopKeepalive();
     clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = null;
     if (socket) {
         socket.close();
         socket = null;
     }
+    setSyncPhase('idle', '');
 }
 
 function scheduleReconnect() {
@@ -179,78 +442,152 @@ function scheduleReconnect() {
 }
 
 function notifyStatusUpdate() {
-    chrome.runtime.sendMessage({
+    api.runtime.sendMessage({
         type: 'statusUpdate'
     }).catch(() => {});
 }
 
-// Handle messages from popup
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === 'getStatus') {
-        sendResponse({
-            connected: socket && socket.readyState === WebSocket.OPEN,
-            enabled: isEnabled,
-            account: currentAccount
-        });
-    } else if (request.type === 'settingsChanged') {
-        const { account, serverUrl, enabled } = request.settings;
-        
-        // Update settings
-        if (account !== currentAccount) {
-            currentAccount = account;
-        }
-        if (serverUrl !== serverUrl) {
-            serverUrl = serverUrl;
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                disconnect();
-                setTimeout(connect, 100);
-            }
-        }
-        
-        // Handle enable/disable toggle
-        if (enabled !== isEnabled) {
-            isEnabled = enabled;
-            if (isEnabled) {
-                connect();
-            } else {
-                disconnect();
-            }
-        }
-        
-        sendResponse({ success: true });
+function setSyncPhase(phase, detail) {
+    syncPhase = phase;
+    syncDetail = detail || '';
+    if (phase === 'error') {
+        lastError = syncDetail;
+    } else if (phase === 'online') {
+        lastError = '';
     }
-});
+    notifyStatusUpdate();
+}
 
-// Load settings on startup
-chrome.storage.local.get(['enabled', 'account', 'serverUrl'], (settings) => {
-    isEnabled = settings.enabled ?? false;
-    currentAccount = settings.account || '';
-    serverUrl = settings.serverUrl || DEFAULT_SERVER_URL;
+function handleSettingsChange(settings) {
+    const { account, serverUrl: newServerUrl, enabled, cookieDomains, cookieDomain, probeUrl } = settings;
 
-    console.log('[CookieSync] Loaded settings:', {
-        enabled: isEnabled,
-        account: currentAccount,
-        serverUrl: serverUrl
-    });
-
-    if (isEnabled && currentAccount) {
-        connect();
+    if (account !== undefined) {
+        currentAccount = account;
     }
-});
-
-// Listen for storage changes
-chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local') return;
-
-    if (changes.account) {
-        currentAccount = changes.account.newValue || '';
+    if (cookieDomains !== undefined || cookieDomain !== undefined) {
+        const parsed = parseDomains(cookieDomains !== undefined ? cookieDomains : cookieDomain);
+        currentCookieDomains = parsed.length ? parsed : [...DEFAULT_COOKIE_DOMAINS];
     }
-    if (changes.serverUrl) {
-        serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER_URL;
+    if (probeUrl !== undefined) {
+        currentProbeUrl = probeUrl || DEFAULT_PROBE_URL;
+    }
+    if (newServerUrl !== undefined && newServerUrl !== currentServerUrl) {
+        currentServerUrl = newServerUrl;
         if (socket && socket.readyState === WebSocket.OPEN) {
             disconnect();
             setTimeout(connect, 100);
         }
     }
+    if (enabled !== undefined && enabled !== isEnabled) {
+        isEnabled = enabled;
+        if (isEnabled) {
+            ensureKeepalive();
+            connect();
+        } else {
+            stopKeepalive();
+            disconnect();
+        }
+    }
+}
+
+function loadSettings() {
+    return new Promise((resolve) => {
+        api.storage.local.get(
+            ['enabled', 'account', 'serverUrl', 'cookieDomains', 'cookieDomain', 'probeUrl'],
+            (settings) => {
+                const parsed = parseDomains(
+                    settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain
+                );
+                isEnabled = settings.enabled ?? false;
+                currentAccount = settings.account || '';
+                currentServerUrl = settings.serverUrl || DEFAULT_SERVER_URL;
+                currentCookieDomains = parsed.length ? parsed : [...DEFAULT_COOKIE_DOMAINS];
+                currentProbeUrl = settings.probeUrl || DEFAULT_PROBE_URL;
+
+                console.log('[CookieSync] Loaded settings:', {
+                    enabled: isEnabled,
+                    account: currentAccount,
+                    serverUrl: currentServerUrl,
+                    cookieDomains: currentCookieDomains,
+                    probeUrl: currentProbeUrl
+                });
+
+                resolve(settings);
+            }
+        );
+    });
+}
+
+// Handle messages from popup
+api.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.type === 'getStatus') {
+        sendResponse({
+            connected: socket && socket.readyState === WebSocket.OPEN,
+            enabled: isEnabled,
+            phase: syncPhase,
+            detail: syncDetail,
+            account: currentAccount,
+            serverUrl: currentServerUrl,
+            cookieDomains: currentCookieDomains,
+            probeUrl: currentProbeUrl,
+            error: lastError
+        });
+        return true;
+    }
+
+    if (request.type === 'settingsChanged') {
+        handleSettingsChange(request.settings);
+        sendResponse({ success: true });
+        return true;
+    }
 });
 
+// Local cookie changes: ignore other domains and self-applied remote changes,
+// debounce, then push to server if authenticated.
+api.cookies.onChanged.addListener((changeInfo) => {
+    const cookie = changeInfo.cookie;
+    if (!isCookieForSyncDomain(cookie)) {
+        return;
+    }
+    if (isExpectedRemoteChange(cookie)) {
+        return;
+    }
+    scheduleCookieSync();
+});
+
+// Listen for storage changes
+api.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+
+    const newSettings = {};
+    if (changes.account) {
+        newSettings.account = changes.account.newValue || '';
+    }
+    if (changes.serverUrl) {
+        newSettings.serverUrl = changes.serverUrl.newValue || DEFAULT_SERVER_URL;
+    }
+    if (changes.enabled) {
+        newSettings.enabled = changes.enabled.newValue ?? false;
+    }
+    if (changes.cookieDomains) {
+        newSettings.cookieDomains = changes.cookieDomains.newValue;
+    } else if (changes.cookieDomain) {
+        newSettings.cookieDomain = changes.cookieDomain.newValue;
+    }
+    if (changes.probeUrl) {
+        newSettings.probeUrl = changes.probeUrl.newValue || DEFAULT_PROBE_URL;
+    }
+    handleSettingsChange(newSettings);
+});
+
+// Startup
+api.runtime.onInstalled?.addListener(() => {
+    console.log('[CookieSync] Extension installed/updated');
+});
+
+loadSettings().then(() => {
+    if (isEnabled && currentAccount) {
+        ensureKeepalive();
+        connect();
+    }
+});
