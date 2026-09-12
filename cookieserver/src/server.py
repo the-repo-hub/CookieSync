@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import ssl
 
 import websockets
@@ -11,18 +10,71 @@ from cookieserver.src.choices import Fields
 from cookieserver.src.commands import COMMAND_REGISTRY
 from cookieserver.src.errors import HandleCommandError, StorageError
 from cookieserver.src.request import Request
-from cookieserver.src.settings import KEYS_PATH, PING_INTERVAL, PING_TIMEOUT
+from cookieserver.src.settings import (
+    CERT_PATH,
+    KEY_PATH,
+    PING_INTERVAL,
+    PING_TIMEOUT,
+)
 from cookieserver.src.storage import AccountStorage
 
 logger = logging.getLogger(__name__)
 
 
+class HandshakeFriendlyLogger(logging.LoggerAdapter):
+    """Логгер, который подмешивается в websockets.serve() как logger=.
+
+    Неудачный открывающий handshake websockets логирует целиком с traceback
+    через Logger.error() — запись выглядит как падение сервера, хотя lib сама
+    закрывает соединение до вызова нашего обработчика.
+
+    Превращаем именно эту запись в краткую осмысленную строку без traceback;
+    остальные ошибки (в том числе падение нашего conn_handler) логируем
+    как раньше.
+    """
+
+    _HANDSHAKE_FAILED = 'opening handshake failed'
+
+    def __init__(self, logger: logging.Logger, tls_enabled: bool):
+        super().__init__(logger, None)
+        self.tls_enabled = tls_enabled
+
+    def log(self, level: int, msg: str, *args, **kwargs) -> None:
+        if level >= logging.ERROR and msg == self._HANDSHAKE_FAILED:
+            level = logging.WARNING
+            kwargs.pop('exc_info', None)
+            msg = self._describe_failure()
+            args = ()
+        return super().log(level, msg, *args, **kwargs)
+
+    def _describe_failure(self) -> str:
+        if self.tls_enabled:
+            return (
+                'opening handshake failed (TLS server): client sent non-HTTP data. '
+                'The client must use wss:// — a ws:// client cannot talk to a TLS server'
+            )
+        return (
+            'opening handshake failed (non-TLS server): client sent non-HTTP data. '
+            'Likely a wss:// client tried to connect to this ws:// server — '
+            'use ws:// on the client or enable TLS on the server (runserver without --no-tls)'
+        )
+
+
 class Server:
 
-    def __init__(self, host: str, port: int, use_tls: bool = True):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        use_tls: bool = True,
+        certfile: str | None = None,
+        keyfile: str | None = None,
+    ):
         self.host = host
         self.port = port
         self.use_tls = use_tls
+        self.certfile = certfile
+        self.keyfile = keyfile
         self.server: WSServer | None = None
         self.storage = AccountStorage()
 
@@ -106,13 +158,21 @@ class Server:
     async def start(self) -> None:
         ssl_context = None
         if self.use_tls:
+            certfile = self.certfile or CERT_PATH
+            keyfile = self.keyfile or KEY_PATH
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(
-                certfile=os.path.join(KEYS_PATH, "cert.pem"),
-                keyfile=os.path.join(KEYS_PATH, "key.pem"),
-            )
+            context.load_cert_chain(certfile=certfile, keyfile=keyfile)
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             ssl_context = context
+
+            logger.warning(
+                "TLS enabled. Browser clients will reject the wss:// handshake "
+                "silently if the certificate is not trusted. If this is a "
+                "self-signed or test certificate, either trust it in the "
+                "browser/OS, or run with --no-tls and point the client at "
+                "ws://. For a CA-issued certificate (e.g. Let's Encrypt), put "
+                "its cert/key paths into server_config.conf [server]."
+            )
 
         self.server = await websockets.serve(
             self._connection_processor,
@@ -121,6 +181,7 @@ class Server:
             ssl=ssl_context,
             ping_interval=PING_INTERVAL,
             ping_timeout=PING_TIMEOUT,
+            logger=HandshakeFriendlyLogger(logger, self.use_tls),
         )
 
     async def wait_closed(self) -> None:

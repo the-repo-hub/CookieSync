@@ -1,6 +1,7 @@
 """Test module for CookieServer."""
 import asyncio
 import json
+import logging
 import os
 import subprocess
 from unittest.mock import patch
@@ -8,9 +9,11 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
+from cookieserver.manage import RunServerCommand, build_parser
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.server import Server
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_SERVER_PATH, KEYS_PATH
+from cookieserver.src.storage import AccountStorage
 from cookieserver.tests.AsyncWSClient import AsyncWSClient
 
 HOST = '127.0.0.1'
@@ -34,6 +37,21 @@ def asset_dirs():
             check=True,
             capture_output=True,
         )
+
+
+@pytest.fixture(scope='session', autouse=True)
+def temp_accounts_storage(tmp_path_factory):
+    """Изолирует тесты от реальной папки cookieserver/accounts/.
+
+    Иначе серверные/менеджмент-тесты пишут account-файлы прямо в рабочее
+    хранилище (например, custom_cert_account.json, post_tls_account.json).
+    """
+    accounts_dir = tmp_path_factory.mktemp('accounts')
+    mpatch = pytest.MonkeyPatch()
+    mpatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+    mpatch.setattr('cookieserver.tests.test_cookieserver.ACCOUNTS_PATH', str(accounts_dir))
+    yield accounts_dir
+    mpatch.undo()
 
 
 @pytest.fixture
@@ -60,6 +78,16 @@ def server_url(server):
     sock = server.server.sockets[0]
     port = sock.getsockname()[1]
     return f'wss://{HOST}:{port}'
+
+
+@pytest_asyncio.fixture
+async def plain_server():
+    server = Server(host=HOST, port=0, use_tls=False)
+    await server.start()
+    try:
+        yield server
+    finally:
+        await server.stop()
 
 
 @pytest_asyncio.fixture
@@ -470,3 +498,164 @@ class TestCookieServer:
             await second_client.recv_server_message(timeout=0.2)
         # и куки не записались в другой аккаунт
         assert server.storage.get_account(other_account).payload != cookies_not_sample
+
+    @pytest.mark.asyncio
+    async def test_tls_client_on_plain_server_logs_concisely(
+        self, plain_server, caplog,
+    ):
+        """TLS-байты на ws://-сервере: краткая запись WARNING без traceback, сервер жив."""
+        port = plain_server.server.sockets[0].getsockname()[1]
+
+        account_name = 'post_tls_account'
+        if account_name in plain_server.storage.get_all_accounts():
+            plain_server.storage.remove_account(account_name)
+        plain_server.storage.add_account(account_name)
+
+        # Отправляем TLS ClientHello в незашифрованный сервер
+        reader, writer = await asyncio.open_connection(HOST, port)
+        writer.write(b'\x16\x03\x01\x00\x02' + b'\x01\x00')
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+        await self.wait_until(
+            lambda: any(
+                r.name == 'cookieserver.src.server'
+                and 'opening handshake failed' in r.getMessage()
+                for r in caplog.records
+            )
+        )
+
+        handshake_records = [
+            r for r in caplog.records
+            if 'opening handshake failed' in r.getMessage()
+        ]
+        assert handshake_records
+        assert all(r.levelname == 'WARNING' for r in handshake_records)
+        assert all(r.exc_info is None for r in handshake_records)
+        # сообщение должно явно подсказывать причину (wss:// клиент на ws:// сервере)
+        assert all('wss://' in r.getMessage() for r in handshake_records)
+
+        # сервер продолжает обслуживать обычных клиентов
+        client = AsyncWSClient('after_tls')
+        await client.connect(f'ws://{HOST}:{port}')
+        try:
+            response = await client.send_request(register_payload(account_name))
+            assert response[Fields.result] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_server_with_custom_cert_paths(self, tmp_path):
+        """Сервер стартует с сертификатом из произвольных путей (--cert/--key)."""
+        cert_path = os.path.join(tmp_path, 'custom_cert.pem')
+        key_path = os.path.join(tmp_path, 'custom_key.pem')
+        subprocess.run(
+            [
+                'openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
+                '-keyout', key_path, '-x509', '-days', '1',
+                '-out', cert_path, '-subj', '/CN=custom-local',
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        srv = Server(host=HOST, port=0, use_tls=True,
+                     certfile=str(cert_path), keyfile=str(key_path))
+        await srv.start()
+        try:
+            port = srv.server.sockets[0].getsockname()[1]
+            client = AsyncWSClient('custom_cert_client')
+            await client.connect(f'wss://{HOST}:{port}')
+            try:
+                account_name = 'custom_cert_account'
+                if account_name in srv.storage.get_all_accounts():
+                    srv.storage.remove_account(account_name)
+                srv.storage.add_account(account_name)
+                response = await client.send_request(register_payload(account_name))
+                assert response[Fields.result] is True
+            finally:
+                await client.close()
+        finally:
+            await srv.stop()
+
+
+class TestManagementCommands:
+    """Тесты management-команд manage.py (create/list/remove_account, runserver)."""
+
+    @pytest.fixture
+    def manage_assets(self, tmp_path, monkeypatch):
+        accounts_dir = tmp_path / 'accounts'
+        accounts_dir.mkdir()
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+        return accounts_dir
+
+    def test_create_account(self, manage_assets):
+        args = build_parser().parse_args(['create_account', 'alice'])
+        args.handler(args)
+        assert (manage_assets / 'alice.json').is_file()
+        assert AccountStorage().get_account('alice') is not None
+
+    def test_create_account_existing_raises(self, manage_assets):
+        AccountStorage().add_account('alice')
+        args = build_parser().parse_args(['create_account', 'alice'])
+        with pytest.raises(SystemExit):
+            args.handler(args)
+
+    def test_list_accounts(self, manage_assets, capsys):
+        AccountStorage().add_account('alice')
+        AccountStorage().add_account('bob')
+        args = build_parser().parse_args(['list_accounts'])
+        args.handler(args)
+        out = capsys.readouterr().out
+        assert 'alice' in out
+        assert 'bob' in out
+
+    def test_list_accounts_empty(self, manage_assets, capsys):
+        args = build_parser().parse_args(['list_accounts'])
+        args.handler(args)
+        assert 'No accounts' in capsys.readouterr().out
+
+    def test_remove_account(self, manage_assets):
+        AccountStorage().add_account('alice')
+        args = build_parser().parse_args(['remove_account', 'alice'])
+        args.handler(args)
+        assert not (manage_assets / 'alice.json').exists()
+        assert AccountStorage().get_all_accounts() == []
+
+    def test_remove_account_missing_raises(self, manage_assets):
+        args = build_parser().parse_args(['remove_account', 'ghost'])
+        with pytest.raises(SystemExit):
+            args.handler(args)
+
+    def test_help_command_lists_commands(self, manage_assets, capsys):
+        args = build_parser().parse_args(['help'])
+        args.handler(args)
+        out = capsys.readouterr().out
+        assert 'runserver' in out
+        assert 'create_account' in out
+        assert 'list_accounts' in out
+        assert 'remove_account' in out
+
+    def test_runserver_defaults_to_tls(self, manage_assets):
+        args = build_parser().parse_args(['runserver', '--port', '0'])
+        server = RunServerCommand().build_server(args)
+        assert server.host == '0.0.0.0'
+        assert server.use_tls is True
+        assert server.certfile == KEYS_PATH + '/cert.pem'
+        assert server.keyfile == KEYS_PATH + '/key.pem'
+
+    def test_runserver_without_tls(self, manage_assets):
+        args = build_parser().parse_args(['runserver', '--no-tls', '--port', '0'])
+        server = RunServerCommand().build_server(args)
+        assert server.use_tls is False
+        assert server.certfile is None
+        assert server.keyfile is None
+
+    def test_runserver_custom_cert(self, manage_assets):
+        args = build_parser().parse_args(
+            ['runserver', '--port', '0', '--cert', '/tmp/c.pem', '--key', '/tmp/k.pem']
+        )
+        server = RunServerCommand().build_server(args)
+        assert server.certfile == '/tmp/c.pem'
+        assert server.keyfile == '/tmp/k.pem'

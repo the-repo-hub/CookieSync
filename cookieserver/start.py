@@ -2,10 +2,9 @@ import argparse
 import asyncio
 
 from cookieserver.src.server import Server
-from cookieserver.src.settings import HOST, PORT
-import logging
+from cookieserver.src.settings import HOST, PORT, configure_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging('INFO')
 
 
 def main():

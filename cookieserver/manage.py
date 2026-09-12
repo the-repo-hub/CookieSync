@@ -8,7 +8,14 @@ from typing import List
 
 from cookieserver.src.errors import StorageError
 from cookieserver.src.server import Server
-from cookieserver.src.settings import HOST, LOG_LEVEL, PORT
+from cookieserver.src.settings import (
+    CERT_PATH,
+    HOST,
+    KEY_PATH,
+    LOG_LEVEL,
+    PORT,
+    configure_logging,
+)
 from cookieserver.src.storage import AccountStorage
 
 
@@ -30,11 +37,30 @@ class RunServerCommand(BaseCommand):
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--host", type=str, default=HOST)
         parser.add_argument("--port", type=int, default=PORT)
-        parser.add_argument("--no-tls", action="store_true", help="run without TLS (ws://)")
+        parser.add_argument(
+            "--no-tls", action="store_true", help="run without TLS (ws://)"
+        )
+        parser.add_argument(
+            "--cert", type=str, default=None,
+            help="Path to the TLS certificate (PEM). Defaults to server_config.conf [server] cert.",
+        )
+        parser.add_argument(
+            "--key", type=str, default=None,
+            help="Path to the TLS private key (PEM). Defaults to server_config.conf [server] key.",
+        )
+
+    def build_server(self, args: argparse.Namespace) -> Server:
+        return Server(
+            args.host,
+            args.port,
+            use_tls=not args.no_tls,
+            certfile=args.cert or (CERT_PATH if not args.no_tls else None),
+            keyfile=args.key or (KEY_PATH if not args.no_tls else None),
+        )
 
     def handle(self, args: argparse.Namespace) -> None:
-        logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
-        server = Server(args.host, args.port, use_tls=not args.no_tls)
+        configure_logging(LOG_LEVEL)
+        server = self.build_server(args)
         try:
             asyncio.run(server.run())
         except KeyboardInterrupt:
