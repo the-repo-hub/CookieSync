@@ -24,9 +24,9 @@ class Account:
         self.full_path = os.path.join(ACCOUNTS_PATH, filename)
         self.lock = asyncio.Lock()
 
-    def set_payload(self, payload):
+    def set_payload(self, payload) -> bool:
         if payload == self.payload:
-            raise StorageError('Payload is same, set is failed')
+            return False
         now = time.time()
         if now - self.updated_at < COOKIE_TIMEOUT:
             remaining = int(COOKIE_TIMEOUT - (now - self.updated_at))
@@ -36,6 +36,7 @@ class Account:
         self.updated_at = now
         self.payload = payload
         self.write_file()
+        return True
 
     def write_file(self):
         with open(self.full_path, 'w') as f:
@@ -52,7 +53,25 @@ class AccountStorage:
     def __init__(self):
         self._accounts: Dict[str, Account] = {}
         self.websockets_by_account: Dict[str, Set[ServerConnection]] = {}
+        self._ws_accounts: Dict[ServerConnection, str] = {}
         self._load_accounts()
+
+    def add_client(self, websocket: ServerConnection, account_name: str) -> None:
+        previous = self._ws_accounts.get(websocket)
+        if previous is not None and previous != account_name:
+            previous_set = self.websockets_by_account.get(previous)
+            if previous_set:
+                previous_set.discard(websocket)
+        self._ws_accounts[websocket] = account_name
+        self.websockets_by_account.setdefault(account_name, set()).add(websocket)
+
+    def remove_client(self, websocket: ServerConnection) -> None:
+        account_name = self._ws_accounts.pop(websocket, None)
+        if account_name is None:
+            return
+        ws_set = self.websockets_by_account.get(account_name)
+        if ws_set:
+            ws_set.discard(websocket)
 
     def _load_accounts(self) -> None:
         for filename in os.listdir(ACCOUNTS_PATH):
@@ -103,6 +122,6 @@ class AccountStorage:
         # for client in clients:
         #     client.writer.close()
 
-    def set_cookies(self, account_name: str, request: Request) -> None:
+    def set_cookies(self, account_name: str, request: Request) -> bool:
         account = self.require_account(account_name)
-        account.set_payload(request.payload)
+        return account.set_payload(request.payload)

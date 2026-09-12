@@ -3,22 +3,18 @@ import json
 import logging
 import os
 import ssl
-from typing import Dict, Optional
 
 import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
 
 from cookieserver.src.choices import Fields
 from cookieserver.src.commands import COMMAND_REGISTRY
-from cookieserver.src.errors import HandleCommandError
+from cookieserver.src.errors import HandleCommandError, StorageError
 from cookieserver.src.request import Request
-from cookieserver.src.settings import KEYS_PATH
+from cookieserver.src.settings import KEYS_PATH, PING_INTERVAL, PING_TIMEOUT
 from cookieserver.src.storage import AccountStorage
 
 logger = logging.getLogger(__name__)
-
-PING_INTERVAL = 30
-PING_TIMEOUT = 10
 
 
 class Server:
@@ -29,13 +25,6 @@ class Server:
         self.use_tls = use_tls
         self.server: WSServer | None = None
         self.storage = AccountStorage()
-        self._ws_accounts: Dict[ServerConnection, str] = {}
-
-    def _track_ws(self, websocket: ServerConnection, account_name: str) -> None:
-        self._ws_accounts[websocket] = account_name
-
-    def _untrack_ws(self, websocket: ServerConnection) -> Optional[str]:
-        return self._ws_accounts.pop(websocket, None)
 
     async def _connection_processor(self, websocket: ServerConnection) -> None:
         logger.info(f"Client connected: {websocket.remote_address}")
@@ -43,14 +32,7 @@ class Server:
             async for message in websocket:
                 await self._handle_message(websocket, message)
         finally:
-            account_name = self._untrack_ws(websocket)
-            if account_name:
-                ws_set = self.storage.websockets_by_account.get(account_name)
-                if ws_set:
-                    ws_set.discard(websocket)
-                    logger.info(
-                        f"Client {websocket.remote_address} removed from account {account_name}"
-                    )
+            self.storage.remove_client(websocket)
             logger.info(f"Client disconnected: {websocket.remote_address}")
 
     async def _handle_message(
@@ -65,7 +47,7 @@ class Server:
                 raise ValueError('Message must be a JSON object')
             request_uuid = raw_data.get(Fields.uuid, '')
         except (json.JSONDecodeError, TypeError, ValueError) as e:
-            logger.warning(f"Malformed message from {websocket.remote_address}: {e}")
+            logger.warning(f"Malformed message from {websocket.remote_address}: {e} {message}")
             await websocket.send(json.dumps({
                 Fields.result: False,
                 Fields.message: 'Invalid message format',
@@ -73,19 +55,11 @@ class Server:
             }))
             return
 
-        # there is no reason to handle it by business-logic
-        if raw_data.get(Fields.command) == 'ping':
-            await websocket.send(json.dumps({
-                Fields.command: 'pong',
-                Fields.uuid: request_uuid,
-            }))
-            return
-
         try:
             request = Request(raw_data)
             logger.info(
-                f"Client {websocket.remote_address} sent command "
-                f"{request.command} to account {request.account}"
+                f"Received command {request.command} from "
+                f"client {websocket.remote_address} for account {request.account}"
             )
 
             command_class = COMMAND_REGISTRY.get(request.command)
@@ -102,20 +76,27 @@ class Server:
                 Fields.uuid: request.uuid
             })
 
-            if request.command == 'register':
-                self._track_ws(websocket, request.account)
-
             await websocket.send(json.dumps(response))
 
         except HandleCommandError as e:
             logger.warning(f"Protocol error from {websocket.remote_address}: {e}")
+            logger.debug(f"Failed message from {websocket.remote_address}: {message!r}")
             await websocket.send(json.dumps({
                 Fields.result: False,
                 Fields.message: str(e),
                 Fields.uuid: request_uuid,
             }))
-        except Exception as e:
+        except StorageError as e:
+            logger.warning(f"Storage error from {websocket.remote_address}: {e}")
+            logger.debug(f"Failed message from {websocket.remote_address}: {message!r}")
+            await websocket.send(json.dumps({
+                Fields.result: False,
+                Fields.message: str(e),
+                Fields.uuid: request_uuid,
+            }))
+        except Exception:
             logger.exception("Unexpected error processing message")
+            logger.debug(f"Failing message from {websocket.remote_address}: {message!r}")
             await websocket.send(json.dumps({
                 Fields.result: False,
                 Fields.message: 'Internal server error',

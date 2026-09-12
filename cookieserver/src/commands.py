@@ -31,7 +31,7 @@ class RegisterCookiesCommand(Command):
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
         account = storage.require_account(request.account)
         async with account.lock:
-            storage.websockets_by_account.setdefault(account.name, set()).add(websocket)
+            storage.add_client(websocket, account.name)
             logger.info(f"Client {websocket.remote_address} registered in account {account.name}")
             return {
                 Fields.message: f'Registered successfully in account {account.name}.',
@@ -45,15 +45,16 @@ class SetCookiesCommand(Command):
 
         account = storage.require_account(request.account)
         async with account.lock:
-            storage.set_cookies(request.account, request)
+            changed = storage.set_cookies(request.account, request)
             output = {
                 Fields.command: Commands.set,
                 Fields.payload: request.payload,
             }
-            websockets = storage.websockets_by_account.get(request.account)
-            tasks = [asyncio.create_task(self._send(ws, output))
-                     for ws in websockets if ws is not websocket]
-            await asyncio.gather(*tasks)
+            if changed:
+                websockets = storage.websockets_by_account.get(request.account)
+                tasks = [asyncio.create_task(self._send(ws, output))
+                         for ws in websockets if ws is not websocket]
+                await asyncio.gather(*tasks)
             logger.debug(f"Client {websocket.remote_address} has set_cookies done in {account.name}")
             return {
                 Fields.message: 'Cookies was set successfully',
