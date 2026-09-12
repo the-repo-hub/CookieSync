@@ -642,24 +642,25 @@ Do not rely on in-memory variables surviving background-worker destruction.
 
 # Cookie handling
 
-Current target domain:
+Domains are configurable. Stored as a list in browser settings under `cookieDomains`.
+
+Default:
 
 ```text
 reso.ru
 ```
 
-Correct domain matching:
+Correct domain matching (each configured target):
 
 ```javascript
-domain === 'reso.ru'
-||
-domain.endsWith('.reso.ru')
+domain === target ||
+domain.endsWith('.' + target)
 ```
 
 Do not use:
 
 ```javascript
-domain.includes('reso.ru')
+domain.includes(target)
 ```
 
 because it matches unrelated domains such as:
@@ -667,6 +668,8 @@ because it matches unrelated domains such as:
 ```text
 evilreso.ru
 ```
+
+A cookie belongs to the account if it matches at least one configured domain.
 
 ---
 
