@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import ssl
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
@@ -14,7 +14,6 @@ from cookieserver.src.errors import HandleCommandError
 from cookieserver.src.request import Request
 from cookieserver.src.settings import KEYS_PATH
 from cookieserver.src.storage import AccountStorage
-from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +23,10 @@ PING_TIMEOUT = 10
 
 class Server:
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, use_tls: bool = True):
         self.host = host
         self.port = port
+        self.use_tls = use_tls
         self.server: WSServer | None = None
         self.storage = AccountStorage()
         self._ws_accounts: Dict[ServerConnection, str] = {}
@@ -61,15 +61,27 @@ class Server:
         request_uuid = ''
         try:
             raw_data = json.loads(message)
+            if not isinstance(raw_data, dict):
+                raise ValueError('Message must be a JSON object')
             request_uuid = raw_data.get(Fields.uuid, '')
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"Malformed message from {websocket.remote_address}: {e}")
+            await websocket.send(json.dumps({
+                Fields.result: False,
+                Fields.message: 'Invalid message format',
+                Fields.uuid: request_uuid,
+            }))
+            return
 
-            if raw_data.get(Fields.command) == 'ping':
-                await websocket.send(json.dumps({
-                    Fields.command: 'pong',
-                    Fields.uuid: request_uuid,
-                }))
-                return
+        # there is no reason to handle it by business-logic
+        if raw_data.get(Fields.command) == 'ping':
+            await websocket.send(json.dumps({
+                Fields.command: 'pong',
+                Fields.uuid: request_uuid,
+            }))
+            return
 
+        try:
             request = Request(raw_data)
             logger.info(
                 f"Client {websocket.remote_address} sent command "
@@ -95,28 +107,37 @@ class Server:
 
             await websocket.send(json.dumps(response))
 
-        except Exception as e:
-            logger.exception(f"Error processing message: {e}")
-            error_response = {
+        except HandleCommandError as e:
+            logger.warning(f"Protocol error from {websocket.remote_address}: {e}")
+            await websocket.send(json.dumps({
                 Fields.result: False,
                 Fields.message: str(e),
                 Fields.uuid: request_uuid,
-            }
-            await websocket.send(json.dumps(error_response))
+            }))
+        except Exception as e:
+            logger.exception("Unexpected error processing message")
+            await websocket.send(json.dumps({
+                Fields.result: False,
+                Fields.message: 'Internal server error',
+                Fields.uuid: request_uuid,
+            }))
 
     async def start(self) -> None:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(
-            certfile=os.path.join(KEYS_PATH, "cert.pem"),
-            keyfile=os.path.join(KEYS_PATH, "key.pem"),
-        )
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        ssl_context = None
+        if self.use_tls:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(
+                certfile=os.path.join(KEYS_PATH, "cert.pem"),
+                keyfile=os.path.join(KEYS_PATH, "key.pem"),
+            )
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            ssl_context = context
 
         self.server = await websockets.serve(
             self._connection_processor,
             self.host,
             self.port,
-            ssl=context,
+            ssl=ssl_context,
             ping_interval=PING_INTERVAL,
             ping_timeout=PING_TIMEOUT,
         )
@@ -125,12 +146,19 @@ class Server:
         if self.server:
             await self.server.wait_closed()
 
+    async def run(self) -> None:
+        await self.start()
+        try:
+            await self.wait_closed()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self.stop()
+
     async def stop(self) -> None:
-        logger.info("Stopping server...")
 
         if not self.server:
             return
 
         self.server.close()
         await self.server.wait_closed()
-        logger.info("Server stopped")

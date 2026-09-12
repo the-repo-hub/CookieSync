@@ -27,20 +27,17 @@ def main():
         help=f"Port where the server will run (default: {port})"
     )
 
-    args = parser.parse_args()
-    srv = Server(args.host, args.port)
+    parser.add_argument(
+        "--no-tls",
+        action="store_true",
+        help="Run without TLS (ws:// instead of wss://)"
+    )
 
-    async def run():
-        await srv.start()
-        try:
-            await srv.wait_closed()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await srv.stop()
+    args = parser.parse_args()
+    srv = Server(args.host, args.port, use_tls=not args.no_tls)
 
     try:
-        asyncio.run(run())
+        asyncio.run(srv.run())
     except KeyboardInterrupt:
         pass
 

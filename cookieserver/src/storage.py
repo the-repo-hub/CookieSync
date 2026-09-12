@@ -3,13 +3,12 @@ import json
 import logging
 import os
 import time
-from functools import cached_property
 from typing import Dict, List, Optional, Set
 
 from websockets.asyncio.server import ServerConnection
 
 from cookieserver.src.errors import StorageError
-from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT, SRC_PATH
+from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT
 from cookieserver.src.request import Request
 
 logger = logging.getLogger(__name__)
@@ -63,17 +62,15 @@ class AccountStorage:
             name = filename.removesuffix(".json")
             path = os.path.join(ACCOUNTS_PATH, filename)
 
-            with open(path) as f:
-                payload = json.load(f)
+            try:
+                with open(path) as f:
+                    payload = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Skipping unreadable account file {path}: {e}")
+                continue
 
             account = Account(name, payload)
             self._accounts[name] = account
-
-    @cached_property
-    def _cookie_sample(self) -> List[Dict]:
-        path = os.path.join(SRC_PATH, 'cookie_sample.json')
-        with open(path) as f:
-            return json.loads(f.read())
 
     def get_all_accounts(self) -> List[str]:
         return list(self._accounts.keys())
@@ -87,10 +84,10 @@ class AccountStorage:
             return account
         raise StorageError(f"Account {account_name} does not exist")
 
-    def add_account(self, account_name: str) -> None:
+    def add_account(self, account_name: str, payload: Optional[List[Dict]] = None) -> None:
         if self.get_account(account_name):
             raise StorageError(f"Cannot add an existing account {account_name} so it cannot be added")
-        account = Account(account_name, payload=self._cookie_sample)
+        account = Account(account_name, payload=payload or [])
         account.write_file()
         self._accounts[account_name] = account
 
