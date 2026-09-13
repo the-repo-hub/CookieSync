@@ -295,6 +295,31 @@ class TestCookieServer:
         assert received_data[Fields.payload] == cookies_not_sample
 
     @pytest.mark.asyncio
+    async def test_set_filters_unrelated_cookies(
+        self, server, cookies_not_sample, account, async_client, second_client,
+    ):
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
+        mixed_cookies = cookies_not_sample + [{
+            'name': 'UnrelatedCookie',
+            'value': 'must-not-be-synchronized',
+            'domain': '.reso.ru',
+            'path': '/',
+        }, {
+            'name': 'resooffice60',
+            'value': 'wrong-case-must-not-be-synchronized',
+            'domain': '.reso.ru',
+            'path': '/',
+        }]
+
+        response = await async_client.send_request(set_payload(account, mixed_cookies))
+
+        assert response[Fields.result] is True
+        assert server.storage.get_account(account).payload == cookies_not_sample
+        received_data = await second_client.recv_server_message()
+        assert received_data[Fields.payload] == cookies_not_sample
+
+    @pytest.mark.asyncio
     async def test_set_does_not_broadcast_to_sender(
         self, server, cookies_not_sample, account, async_client, second_client,
     ):
@@ -586,6 +611,26 @@ class TestCookieServer:
 
         storage = AccountStorage()
         assert storage.get_all_accounts() == []
+
+    def test_storage_removes_unrelated_cookies_from_existing_file(
+        self, tmp_path, monkeypatch, cookies_not_sample,
+    ):
+        accounts_dir = tmp_path / 'accounts'
+        accounts_dir.mkdir()
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+        mixed_cookies = cookies_not_sample + [{
+            'name': 'LegacyCookie',
+            'value': 'must-be-removed',
+            'domain': '.reso.ru',
+            'path': '/',
+        }]
+        account_path = accounts_dir / 'legacy.json'
+        account_path.write_text(json.dumps(mixed_cookies))
+
+        storage = AccountStorage()
+
+        assert storage.require_account('legacy').payload == cookies_not_sample
+        assert json.loads(account_path.read_text()) == cookies_not_sample
 
     @pytest.mark.asyncio
     async def test_tls_client_on_plain_server_logs_concisely(

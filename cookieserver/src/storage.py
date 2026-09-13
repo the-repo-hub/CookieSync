@@ -9,9 +9,19 @@ from websockets.asyncio.server import ServerConnection
 
 from cookieserver.src.errors import StorageError
 from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT
-from cookieserver.src.request import Request
 
 logger = logging.getLogger(__name__)
+
+SYNC_COOKIE_NAMES = frozenset({'ResoOffice60', 'ASP.NET_SessionId'})
+
+
+def filter_sync_cookies(payload: object) -> List[Dict]:
+    if not isinstance(payload, list):
+        return []
+    return [
+        cookie for cookie in payload
+        if isinstance(cookie, dict) and cookie.get('name') in SYNC_COOKIE_NAMES
+    ]
 
 
 class Account:
@@ -93,8 +103,14 @@ class AccountStorage:
                 logger.warning(f"Skipping unreadable account file {path}: {e}")
                 continue
 
-            account = Account(name, payload)
+            filtered_payload = filter_sync_cookies(payload)
+            account = Account(name, filtered_payload)
             self._accounts[name] = account
+            if filtered_payload != payload:
+                try:
+                    account.write_file()
+                except OSError as e:
+                    logger.warning(f"Could not clean account file {path}: {e}")
 
     def get_all_accounts(self) -> List[str]:
         return list(self._accounts.keys())
@@ -111,7 +127,7 @@ class AccountStorage:
     def add_account(self, account_name: str, payload: Optional[List[Dict]] = None) -> None:
         if self.get_account(account_name):
             raise StorageError(f"Cannot add an existing account {account_name} so it cannot be added")
-        account = Account(account_name, payload=payload or [])
+        account = Account(account_name, payload=filter_sync_cookies(payload or []))
         account.write_file()
         self._accounts[account_name] = account
 
@@ -127,6 +143,6 @@ class AccountStorage:
         # for client in clients:
         #     client.writer.close()
 
-    def set_cookies(self, account_name: str, request: Request) -> bool:
+    def set_cookies(self, account_name: str, payload: List[Dict]) -> bool:
         account = self.require_account(account_name)
-        return account.set_payload(request.payload)
+        return account.set_payload(filter_sync_cookies(payload))

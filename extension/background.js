@@ -120,7 +120,7 @@ class CookieSyncClient {
         }
 
         const promises = payload
-            .filter(cookie => cookie && cookie.name)
+            .filter(cookie => isCookieForSync(cookie, currentCookieDomains))
             .map(cookie => {
                 remarkExpectedRemoteChange(expectedRemoteChanges, cookie);
                 return this.setRemoteCookie(cookie);
@@ -241,7 +241,7 @@ async function syncCookiesToServer() {
     }
 
     const payload = cookies
-        .filter(cookie => isCookieForSyncDomain(cookie, currentCookieDomains))
+        .filter(cookie => isCookieForSync(cookie, currentCookieDomains))
         .map(pickCookieFields);
 
     if (!payload.length) {
@@ -504,7 +504,7 @@ browser.runtime.onMessage.addListener((request, sender) => {
 // debounce, then push to server if authenticated.
 browser.cookies.onChanged.addListener((changeInfo) => {
     const cookie = changeInfo.cookie;
-    if (!isCookieForSyncDomain(cookie, currentCookieDomains)) {
+    if (!isCookieForSync(cookie, currentCookieDomains)) {
         return;
     }
     if (isExpectedRemoteChange(expectedRemoteChanges, cookie, REMOTE_CHANGE_TTL_MS)) {

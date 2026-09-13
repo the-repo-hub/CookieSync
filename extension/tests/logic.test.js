@@ -8,6 +8,7 @@ const {
     parseDomains,
     cookieKey,
     isCookieForSyncDomain,
+    isCookieForSync,
     pickCookieFields,
     buildCookieUrl,
     buildCookieSetDetails,
@@ -67,6 +68,17 @@ test('isCookieForSyncDomain: не матчится evilreso.ru и чужие', (
 test('isCookieForSyncDomain: пустой список доменов', () => {
     assert.equal(isCookieForSyncDomain({ domain: 'reso.ru', name: 'a' }, []), false);
     assert.equal(isCookieForSyncDomain({ domain: 'reso.ru', name: 'a' }, undefined), false);
+});
+
+test('isCookieForSync: разрешает только целевые имена на целевых доменах', () => {
+    const domains = ['reso.ru'];
+
+    assert.equal(isCookieForSync({ domain: '.reso.ru', name: 'ResoOffice60' }, domains), true);
+    assert.equal(isCookieForSync({ domain: 'office.reso.ru', name: 'ASP.NET_SessionId' }, domains), true);
+    assert.equal(isCookieForSync({ domain: 'reso.ru', name: 'OtherCookie' }, domains), false);
+    assert.equal(isCookieForSync({ domain: 'reso.ru', name: 'resooffice60' }, domains), false);
+    assert.equal(isCookieForSync({ domain: 'example.com', name: 'ResoOffice60' }, domains), false);
+    assert.equal(isCookieForSync(null, domains), false);
 });
 
 test('pickCookieFields: сохраняет релевантные поля, отбрасывает остальное', () => {

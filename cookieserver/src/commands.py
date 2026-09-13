@@ -45,10 +45,10 @@ class SetCookiesCommand(Command):
 
         account = storage.require_account(request.account)
         async with account.lock:
-            changed = storage.set_cookies(request.account, request)
+            changed = storage.set_cookies(request.account, request.payload)
             output = {
                 Fields.command: Commands.set,
-                Fields.payload: request.payload,
+                Fields.payload: account.payload,
             }
             if changed:
                 websockets = storage.websockets_by_account.get(request.account)

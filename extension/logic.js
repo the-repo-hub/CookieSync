@@ -2,6 +2,8 @@
 // В расширении подключаются как обычные глобальные функции
 // (importScripts / <script>), в Node.js для тестов — как модуль.
 
+const SYNC_COOKIE_NAMES = new Set(['ResoOffice60', 'ASP.NET_SessionId']);
+
 function normalizeDomain(domain) {
     return String(domain || '').replace(/^\./, '').toLowerCase();
 }
@@ -32,6 +34,14 @@ function isCookieForSyncDomain(cookie, domains) {
         const target = normalizeDomain(raw);
         return domain === target || domain.endsWith('.' + target);
     });
+}
+
+function isCookieForSync(cookie, domains) {
+    return Boolean(
+        cookie
+        && SYNC_COOKIE_NAMES.has(cookie.name)
+        && isCookieForSyncDomain(cookie, domains)
+    );
 }
 
 function pickCookieFields(cookie) {
@@ -119,6 +129,7 @@ if (typeof module !== 'undefined' && module.exports) {
         parseDomains,
         cookieKey,
         isCookieForSyncDomain,
+        isCookieForSync,
         pickCookieFields,
         buildCookieUrl,
         buildCookieSetDetails,
