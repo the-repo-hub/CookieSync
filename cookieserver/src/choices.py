@@ -10,3 +10,6 @@ class Fields:
     message = 'message'
     payload = 'payload'
     uuid = 'uuid'
+    accepted = 'accepted'
+    revision = 'revision'
+    retry_after = 'retry_after'

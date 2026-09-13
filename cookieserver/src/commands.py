@@ -6,6 +6,7 @@ from typing import Dict, Type
 
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.request import Request
+from cookieserver.src.settings import BROADCAST_TIMEOUT
 from cookieserver.src.storage import AccountStorage
 from websockets.asyncio.server import ServerConnection
 
@@ -36,6 +37,8 @@ class RegisterCookiesCommand(Command):
             return {
                 Fields.message: f'Registered successfully in account {account.name}.',
                 Fields.payload: account.payload,
+                Fields.revision: account.revision,
+                Fields.retry_after: account.retry_after(),
             }
 
 @register_command(Commands.set)
@@ -45,23 +48,45 @@ class SetCookiesCommand(Command):
 
         account = storage.require_account(request.account)
         async with account.lock:
-            changed = storage.set_cookies(request.account, request.payload)
+            update = storage.set_cookies(request.account, request.payload)
             output = {
                 Fields.command: Commands.set,
                 Fields.payload: account.payload,
+                Fields.revision: account.revision,
+                Fields.retry_after: update.retry_after,
             }
-            if changed:
-                websockets = storage.websockets_by_account.get(request.account)
+            if update.changed:
+                websockets = storage.websockets_by_account.get(request.account, set())
                 tasks = [asyncio.create_task(self._send(ws, output))
                          for ws in websockets if ws is not websocket]
                 await asyncio.gather(*tasks)
             logger.debug(f"Client {websocket.remote_address} has set_cookies done in {account.name}")
             return {
-                Fields.message: 'Cookies was set successfully',
+                Fields.message: (
+                    'Cookies were set successfully'
+                    if update.accepted
+                    else f'Cookie update blocked for {update.retry_after}s; stored cookies restored'
+                ),
+                Fields.payload: account.payload,
+                Fields.accepted: update.accepted,
+                Fields.revision: account.revision,
+                Fields.retry_after: update.retry_after,
             }
 
     async def _send(self, websocket: ServerConnection, output: Dict):
         try:
-            await websocket.send(json.dumps(output))
+            await asyncio.wait_for(
+                websocket.send(json.dumps(output)),
+                timeout=BROADCAST_TIMEOUT,
+            )
         except Exception:
-            pass
+            logger.exception(f'Failed to send cookies to {websocket.remote_address}')
+            try:
+                await websocket.close(
+                    code=1011,
+                    reason='Cookie synchronization failed',
+                )
+            except Exception:
+                logger.exception(
+                    f'Failed to close stale client {websocket.remote_address}'
+                )

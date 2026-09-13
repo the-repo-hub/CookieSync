@@ -2,7 +2,7 @@
 // В расширении подключаются как обычные глобальные функции
 // (importScripts / <script>), в Node.js для тестов — как модуль.
 
-const SYNC_COOKIE_NAMES = new Set(['ResoOffice60', 'ASP.NET_SessionId']);
+const SYNC_COOKIE_NAMES = ['ASP.NET_SessionId', 'ResoOffice60'];
 
 function normalizeDomain(domain) {
     return String(domain || '').replace(/^\./, '').toLowerCase();
@@ -39,9 +39,61 @@ function isCookieForSyncDomain(cookie, domains) {
 function isCookieForSync(cookie, domains) {
     return Boolean(
         cookie
-        && SYNC_COOKIE_NAMES.has(cookie.name)
+        && SYNC_COOKIE_NAMES.includes(cookie.name)
         && isCookieForSyncDomain(cookie, domains)
     );
+}
+
+function selectSyncCookiePair(cookies, domains) {
+    if (!Array.isArray(cookies)) {
+        return [];
+    }
+    const selected = [];
+    for (const name of SYNC_COOKIE_NAMES) {
+        const matches = cookies.filter(
+            cookie => cookie && cookie.name === name && isCookieForSyncDomain(cookie, domains)
+        );
+        if (matches.length !== 1) {
+            return [];
+        }
+        selected.push(matches[0]);
+    }
+    return selected;
+}
+
+function describeConnectionFailure(url, primaryStatus, alternateStatus, timedOut = false) {
+    let wsUrl;
+    try {
+        wsUrl = new URL(url);
+    } catch (e) {
+        return `Некорректный адрес сервера: ${url}`;
+    }
+
+    const usesTls = wsUrl.protocol === 'wss:';
+    if (wsUrl.protocol !== 'ws:' && !usesTls) {
+        return `Некорректный адрес сервера: ${url}`;
+    }
+
+    if (primaryStatus !== null) {
+        const httpProtocol = usesTls ? 'HTTPS' : 'HTTP';
+        return `Узел ${wsUrl.host} доступен по ${httpProtocol} (код ${primaryStatus}), но WebSocket-соединение ${wsUrl.protocol}// не установлено. Проверьте адрес, порт и настройки прокси`;
+    }
+
+    if (alternateStatus !== null) {
+        if (usesTls) {
+            return `Сервер ${wsUrl.host} отвечает без TLS. Если он запущен с --no-tls, укажите в настройках ws://${wsUrl.host}; иначе включите TLS на сервере`;
+        }
+        return `Сервер ${wsUrl.host} отвечает с TLS. Укажите в настройках wss://${wsUrl.host} или запустите сервер с --no-tls для адреса ws://${wsUrl.host}`;
+    }
+
+    if (timedOut) {
+        return `${wsUrl.host} не отвечает (таймаут). Проверьте, запущен ли сервер, а также адрес, порт, сеть и файрвол`;
+    }
+
+    if (usesTls) {
+        return `Не удалось установить соединение с ${url}. Проверьте запуск сервера, сеть и TLS-сертификат; браузер не сообщает точную причину ошибки`;
+    }
+    return `Не удалось установить соединение с ${url}. Проверьте, что сервер запущен с --no-tls, а адрес, порт и сеть доступны`;
 }
 
 function pickCookieFields(cookie) {
@@ -85,7 +137,7 @@ function buildCookieSetDetails(cookie, fallbackDomain) {
         value: String(cookie.value !== undefined ? cookie.value : '')
     };
 
-    if (cookie.domain) {
+    if (cookie.domain && cookie.hostOnly !== true) {
         details.domain = cookie.domain;
     }
     if (cookie.path) {
@@ -110,13 +162,37 @@ function buildCookieSetDetails(cookie, fallbackDomain) {
 // выставлять локально; onChanged для них не должен вызывать повторный set.
 // Ключ нормализуется через cookieKey, поэтому .reso.ru и reso.ru совпадают.
 function remarkExpectedRemoteChange(expected, cookie, now = Date.now()) {
-    expected.set(cookieKey(cookie), now);
+    expected.set(cookieKey(cookie), {
+        at: now,
+        value: String(cookie.value !== undefined ? cookie.value : ''),
+    });
 }
 
-function isExpectedRemoteChange(expected, cookie, ttlMs, now = Date.now()) {
+function isExpectedRemoteChange(
+    expected,
+    cookie,
+    ttlMs,
+    now = Date.now(),
+    removed = false,
+    cause = '',
+) {
     const key = cookieKey(cookie);
-    const at = expected.get(key);
-    if (at !== undefined && now - at < ttlMs) {
+    const marker = expected.get(key);
+    if (!marker) {
+        return false;
+    }
+    if (now - marker.at >= ttlMs) {
+        expected.delete(key);
+        return false;
+    }
+    if (removed && (cause === 'overwrite' || cause === 'expired_overwrite')) {
+        return true;
+    }
+    if (removed) {
+        return false;
+    }
+    const value = String(cookie.value !== undefined ? cookie.value : '');
+    if (marker.value === value) {
         expected.delete(key);
         return true;
     }
@@ -130,6 +206,8 @@ if (typeof module !== 'undefined' && module.exports) {
         cookieKey,
         isCookieForSyncDomain,
         isCookieForSync,
+        selectSyncCookiePair,
+        describeConnectionFailure,
         pickCookieFields,
         buildCookieUrl,
         buildCookieSetDetails,

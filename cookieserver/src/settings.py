@@ -19,6 +19,7 @@ HOST = _config.get('server', 'host', fallback='0.0.0.0')
 PORT = _config.getint('server', 'port', fallback=52314)
 PING_INTERVAL = _config.getint('server', 'ping_interval', fallback=30)
 PING_TIMEOUT = _config.getint('server', 'ping_timeout', fallback=10)
+BROADCAST_TIMEOUT = _config.getint('server', 'broadcast_timeout', fallback=5)
 
 # TLS: пути к сертификату и ключу. Можно указывать сертификаты, выданные CA
 # (например, Let's Encrypt fullchain.pem / privkey.pem) — тогда клиенты-браузеры
@@ -30,8 +31,10 @@ KEY_PATH = os.path.abspath(
     _config.get('server', 'key', fallback=os.path.join(KEYS_PATH, 'key.pem'))
 )
 
-COOKIE_TIMEOUT = _config.getint('server', 'cookie_timeout', fallback=60)
-MAX_SIZE = _config.getint('server', 'max_size', fallback=1024)
+COOKIE_UPDATE_INTERVAL = _config.getint(
+    'server', 'cookie_update_interval', fallback=300,
+)
+MAX_SIZE = _config.getint('server', 'max_size', fallback=16384)
 ENCODING = _config.get('server', 'encoding', fallback='utf-8')
 LOG_LEVEL = _config.get('server', 'log_level', fallback='INFO').upper()
 

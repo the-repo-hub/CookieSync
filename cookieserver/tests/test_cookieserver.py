@@ -12,7 +12,12 @@ import pytest_asyncio
 from cookieserver.manage import RunServerCommand, build_parser
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.server import Server
-from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_SERVER_PATH, KEYS_PATH
+from cookieserver.src.settings import (
+    ACCOUNTS_PATH,
+    COOKIE_SERVER_PATH,
+    COOKIE_UPDATE_INTERVAL,
+    KEYS_PATH,
+)
 from cookieserver.src.storage import AccountStorage
 from cookieserver.tests.AsyncWSClient import AsyncWSClient
 
@@ -152,15 +157,6 @@ def account(server):
         server.storage.remove_account(test_account_name)
 
 
-def make_fake():
-    def fake(self, payload):
-        self.payload = payload
-        self.updated_at = 0
-        self.write_file()
-        return True
-    return fake
-
-
 def register_payload(account):
     return {
         Fields.command: Commands.register,
@@ -199,6 +195,28 @@ class TestCookieServer:
         # закрываем соединение, в это время сервер должен выкинуть клиента из списка
         await async_client.close()
         await self.wait_until(lambda: not server.storage.websockets_by_account.get(account))
+
+    @pytest.mark.asyncio
+    async def test_disconnect_log_keeps_client_address(
+        self, server, account, async_client, caplog,
+    ):
+        await async_client.send_request(register_payload(account))
+        client_address = async_client.ws.local_address
+
+        with caplog.at_level(logging.INFO, logger='cookieserver.src.server'):
+            await async_client.close()
+            await self.wait_until(
+                lambda: not server.storage.websockets_by_account.get(account)
+            )
+
+        disconnect_messages = [
+            record.getMessage() for record in caplog.records
+            if record.name == 'cookieserver.src.server'
+            and record.getMessage().startswith('Client disconnected:')
+        ]
+        assert disconnect_messages
+        assert any(str(client_address) in message for message in disconnect_messages)
+        assert all(not message.endswith('None') for message in disconnect_messages)
 
     @pytest.mark.asyncio
     async def test_client_disconnect_removes_only_own_connection(
@@ -281,10 +299,10 @@ class TestCookieServer:
         assert len(server.storage.websockets_by_account.get(account)) == 2
         assert server.storage.get_account(account).payload != cookies_not_sample
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
+        assert response[Fields.accepted] is True
+        assert response[Fields.revision] == 1
 
         # сервер сохранил куки
         assert server.storage.get_account(account).payload == cookies_not_sample
@@ -320,15 +338,55 @@ class TestCookieServer:
         assert received_data[Fields.payload] == cookies_not_sample
 
     @pytest.mark.asyncio
+    async def test_set_rejects_incomplete_cookie_pair(
+        self, server, cookies_not_sample, account, async_client,
+    ):
+        await async_client.send_request(register_payload(account))
+
+        response = await async_client.send_request(
+            set_payload(account, cookies_not_sample[:1])
+        )
+
+        assert response[Fields.result] is False
+        assert 'exactly one of each' in response[Fields.message]
+        assert server.storage.require_account(account).payload == []
+
+    @pytest.mark.asyncio
+    async def test_set_rejects_cookie_without_required_fields(
+        self, server, cookies_not_sample, account, async_client,
+    ):
+        await async_client.send_request(register_payload(account))
+        malformed = [dict(cookie) for cookie in cookies_not_sample]
+        malformed[0].pop('value')
+
+        response = await async_client.send_request(set_payload(account, malformed))
+
+        assert response[Fields.result] is False
+        assert 'string value' in response[Fields.message]
+        assert server.storage.require_account(account).payload == []
+
+    @pytest.mark.asyncio
+    async def test_set_rejects_empty_cookie_value(
+        self, server, cookies_not_sample, account, async_client,
+    ):
+        await async_client.send_request(register_payload(account))
+        malformed = [dict(cookie) for cookie in cookies_not_sample]
+        malformed[0]['value'] = ''
+
+        response = await async_client.send_request(set_payload(account, malformed))
+
+        assert response[Fields.result] is False
+        assert 'non-empty string value' in response[Fields.message]
+        assert server.storage.require_account(account).payload == []
+
+    @pytest.mark.asyncio
     async def test_set_does_not_broadcast_to_sender(
         self, server, cookies_not_sample, account, async_client, second_client,
     ):
         await async_client.send_request(register_payload(account))
         await second_client.send_request(register_payload(account))
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
 
         # отправитель не должен получить копию своего же set
@@ -344,9 +402,7 @@ class TestCookieServer:
         await second_client.send_request(register_payload(account))
         await second_client.close()
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
         assert server.storage.get_account(account).payload == cookies_not_sample
 
@@ -367,6 +423,7 @@ class TestCookieServer:
 
         duplicate = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert duplicate[Fields.result] is True
+        assert duplicate[Fields.accepted] is True
         assert duplicate[Fields.uuid] == async_client.last_request_uuid
         assert server.storage.get_account(account).payload == cookies_not_sample
 
@@ -375,24 +432,28 @@ class TestCookieServer:
             await second_client.recv_server_message(timeout=0.2)
 
     @pytest.mark.asyncio
-    async def test_both_clients_send_and_receive(
+    async def test_second_client_is_restored_during_update_interval(
         self, server, cookies_not_sample, cookies_other, account, async_client, second_client,
     ):
-        """Оба клиента шлют куки, каждый получает обновления другого."""
+        """Вторая пара блокируется, а отправителю возвращается серверная."""
         await async_client.send_request(register_payload(account))
         await second_client.send_request(register_payload(account))
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            first = await async_client.send_request(set_payload(account, cookies_not_sample))
-            assert first[Fields.result] is True
-            received_by_second = await second_client.recv_server_message()
-            assert received_by_second[Fields.payload] == cookies_not_sample
+        first = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert first[Fields.accepted] is True
+        received_by_second = await second_client.recv_server_message()
+        assert received_by_second[Fields.payload] == cookies_not_sample
 
-            second = await second_client.send_request(set_payload(account, cookies_other))
-            assert second[Fields.result] is True
-            received_by_first = await async_client.recv_server_message()
-            assert received_by_first[Fields.payload] == cookies_other
+        second = await second_client.send_request(set_payload(account, cookies_other))
+        assert second[Fields.result] is True
+        assert second[Fields.accepted] is False
+        assert second[Fields.payload] == cookies_not_sample
+        assert second[Fields.revision] == first[Fields.revision]
+        assert second[Fields.retry_after] > 0
+        assert server.storage.require_account(account).payload == cookies_not_sample
+
+        with pytest.raises(TimeoutError):
+            await async_client.recv_server_message(timeout=0.2)
 
     @pytest.mark.asyncio
     async def test_set_broadcasts_to_all_other_clients(
@@ -403,9 +464,7 @@ class TestCookieServer:
             await client.send_request(register_payload(account))
         assert len(server.storage.websockets_by_account.get(account)) == 3
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
 
         for client in (second_client, third_client):
@@ -424,6 +483,7 @@ class TestCookieServer:
         account_obj = server.storage.get_account(account)
         assert account_obj.payload != cookies_not_sample
         account_obj.updated_at = 0.0
+        account_obj._locked_until = 0.0
 
         response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
@@ -433,7 +493,23 @@ class TestCookieServer:
         # куки записаны на диск
         path = os.path.join(ACCOUNTS_PATH, f'{account}.json')
         with open(path) as f:
-            assert json.loads(f.read()) == cookies_not_sample
+            document = json.loads(f.read())
+        assert document[Fields.payload] == cookies_not_sample
+        assert document['updated_at'] == updated_at_after_change
+        assert document[Fields.revision] == 1
+
+        reloaded_account = AccountStorage().require_account(account)
+        assert reloaded_account.payload == cookies_not_sample
+        assert reloaded_account.updated_at == updated_at_after_change
+        assert reloaded_account.revision == 1
+        with patch(
+            'cookieserver.src.storage.time.monotonic',
+            return_value=reloaded_account._locked_until - 1,
+        ):
+            blocked_after_restart = reloaded_account.set_payload(cookies_other)
+        assert blocked_after_restart.accepted is False
+        assert blocked_after_restart.retry_after == 1
+        assert reloaded_account.payload == cookies_not_sample
 
         # второму клиенту пришла рассылка
         received = await second_client.recv_server_message()
@@ -447,21 +523,71 @@ class TestCookieServer:
             await second_client.recv_server_message(timeout=0.2)
 
     @pytest.mark.asyncio
-    async def test_set_rate_limited(
-        self, server, cookies_not_sample, cookies_other, account, async_client,
+    async def test_failed_file_write_rolls_back_account_state(
+        self, server, cookies_not_sample, account, async_client,
     ):
-        """Смена куки чаще COOKIE_TIMEOUT — ошибка rate limit, старые куки сохраняются."""
         await async_client.send_request(register_payload(account))
+        account_obj = server.storage.require_account(account)
+        previous_payload = account_obj.payload
+        previous_updated_at = account_obj.updated_at
+        previous_revision = account_obj.revision
+
+        with patch.object(account_obj, 'write_file', side_effect=OSError('disk full')):
+            response = await async_client.send_request(
+                set_payload(account, cookies_not_sample)
+            )
+
+        assert response[Fields.result] is False
+        assert account_obj.payload == previous_payload
+        assert account_obj.updated_at == previous_updated_at
+        assert account_obj.revision == previous_revision
+
+    @pytest.mark.asyncio
+    async def test_new_pair_is_accepted_only_after_configured_interval(
+        self, server, cookies_not_sample, cookies_other, account,
+        async_client, second_client,
+    ):
+        """Окно фиксировано от записи и не сдвигается заблокированным set."""
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
         account_obj = server.storage.get_account(account)
         account_obj.updated_at = 0.0
+        account_obj._locked_until = 0.0
 
-        first = await async_client.send_request(set_payload(account, cookies_not_sample))
+        with patch('cookieserver.src.storage.time.time', return_value=1000.0), patch(
+            'cookieserver.src.storage.time.monotonic', return_value=2000.0,
+        ):
+            first = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert first[Fields.result] is True
+        assert first[Fields.accepted] is True
+        assert first[Fields.retry_after] == COOKIE_UPDATE_INTERVAL
+        await second_client.recv_server_message()
 
-        second = await async_client.send_request(set_payload(account, cookies_other))
-        assert second[Fields.result] is False
-        assert 'Rate limit' in second[Fields.message]
+        with patch(
+            'cookieserver.src.storage.time.monotonic',
+            return_value=2000.0 + COOKIE_UPDATE_INTERVAL - 1,
+        ):
+            second = await second_client.send_request(set_payload(account, cookies_other))
+        assert second[Fields.result] is True
+        assert second[Fields.accepted] is False
+        assert second[Fields.retry_after] == 1
+        assert second[Fields.payload] == cookies_not_sample
         assert account_obj.payload == cookies_not_sample
+        assert account_obj.updated_at == 1000.0
+
+        with patch(
+            'cookieserver.src.storage.time.time',
+            return_value=1000.0 + COOKIE_UPDATE_INTERVAL,
+        ), patch(
+            'cookieserver.src.storage.time.monotonic',
+            return_value=2000.0 + COOKIE_UPDATE_INTERVAL,
+        ):
+            third = await second_client.send_request(set_payload(account, cookies_other))
+        assert third[Fields.accepted] is True
+        assert third[Fields.revision] == 2
+        assert account_obj.payload == cookies_other
+        received = await async_client.recv_server_message()
+        assert received[Fields.payload] == cookies_other
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('omitted', [Fields.command, Fields.account, Fields.uuid])
@@ -513,9 +639,7 @@ class TestCookieServer:
         await async_client.send_request(register_payload(account))
         await second_client.send_request(register_payload(other_account))
 
-        fake_set_payload = make_fake()
-        with patch("cookieserver.src.storage.Account.set_payload", new=fake_set_payload):
-            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
         assert response[Fields.result] is True
 
         # клиент другого аккаунта не получает рассылку
@@ -540,6 +664,8 @@ class TestCookieServer:
         assert late[Fields.result] is True
         assert late[Fields.uuid] == third_client.last_request_uuid
         assert late[Fields.payload] == cookies_not_sample
+        assert late[Fields.revision] == 1
+        assert late[Fields.retry_after] > 0
 
     @pytest.mark.asyncio
     async def test_malformed_messages_do_not_kill_connection(
@@ -588,6 +714,7 @@ class TestCookieServer:
         push = await second_client.recv_server_message()
         assert push[Fields.command] == Commands.set
         assert push[Fields.payload] == cookies_not_sample
+        assert push[Fields.revision] == 1
         assert Fields.uuid not in push
 
     def test_storage_skips_corrupt_account_file(self, tmp_path, monkeypatch):
@@ -630,7 +757,30 @@ class TestCookieServer:
         storage = AccountStorage()
 
         assert storage.require_account('legacy').payload == cookies_not_sample
-        assert json.loads(account_path.read_text()) == cookies_not_sample
+        document = json.loads(account_path.read_text())
+        assert document[Fields.payload] == cookies_not_sample
+        assert document['updated_at'] == 0.0
+        assert document[Fields.revision] == 0
+
+    def test_storage_incomplete_pair_does_not_keep_update_lock(
+        self, tmp_path, monkeypatch, cookies_not_sample,
+    ):
+        accounts_dir = tmp_path / 'accounts'
+        accounts_dir.mkdir()
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+        account_path = accounts_dir / 'incomplete.json'
+        account_path.write_text(json.dumps({
+            Fields.payload: cookies_not_sample[:1],
+            'updated_at': 9999999999.0,
+            Fields.revision: 12,
+        }))
+
+        account = AccountStorage().require_account('incomplete')
+
+        assert account.payload == []
+        assert account.updated_at == 0.0
+        assert account.revision == 0
+        assert account.retry_after() == 0
 
     @pytest.mark.asyncio
     async def test_tls_client_on_plain_server_logs_concisely(

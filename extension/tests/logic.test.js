@@ -9,6 +9,8 @@ const {
     cookieKey,
     isCookieForSyncDomain,
     isCookieForSync,
+    selectSyncCookiePair,
+    describeConnectionFailure,
     pickCookieFields,
     buildCookieUrl,
     buildCookieSetDetails,
@@ -81,6 +83,39 @@ test('isCookieForSync: разрешает только целевые имена
     assert.equal(isCookieForSync(null, domains), false);
 });
 
+test('selectSyncCookiePair: возвращает только полную однозначную пару', () => {
+    const domains = ['reso.ru'];
+    const asp = { domain: '.reso.ru', path: '/', name: 'ASP.NET_SessionId', value: 'a' };
+    const office = { domain: '.reso.ru', path: '/', name: 'ResoOffice60', value: 'b' };
+
+    assert.deepEqual(selectSyncCookiePair([office, asp], domains), [asp, office]);
+    assert.deepEqual(selectSyncCookiePair([asp], domains), []);
+    assert.deepEqual(selectSyncCookiePair([asp, office, { ...office }], domains), []);
+    assert.deepEqual(selectSyncCookiePair([asp, office], ['example.com']), []);
+});
+
+test('describeConnectionFailure: распознаёт сервер, запущенный с --no-tls', () => {
+    const message = describeConnectionFailure('wss://localhost:52314', null, 426);
+
+    assert.match(message, /отвечает без TLS/);
+    assert.match(message, /--no-tls/);
+    assert.match(message, /ws:\/\/localhost:52314/);
+});
+
+test('describeConnectionFailure: не называет --no-tls ошибкой для ws://', () => {
+    const message = describeConnectionFailure('ws://localhost:52314', 426, null);
+
+    assert.match(message, /доступен по HTTP/);
+    assert.doesNotMatch(message, /--no-tls/);
+});
+
+test('describeConnectionFailure: распознаёт TLS-сервер для адреса ws://', () => {
+    const message = describeConnectionFailure('ws://localhost:52314', null, 426);
+
+    assert.match(message, /отвечает с TLS/);
+    assert.match(message, /wss:\/\/localhost:52314/);
+});
+
 test('pickCookieFields: сохраняет релевантные поля, отбрасывает остальное', () => {
     const cookie = {
         name: 'sid',
@@ -145,6 +180,15 @@ test('buildCookieSetDetails: отсутствующие поля не включ
     assert.deepEqual(details, { url: 'http://fb.ru/', name: 'a', value: '1' });
 });
 
+test('buildCookieSetDetails: host-only cookie не превращается в domain cookie', () => {
+    const details = buildCookieSetDetails({
+        name: 'a', value: '1', domain: 'office.reso.ru', path: '/', hostOnly: true,
+    }, 'reso.ru');
+
+    assert.equal(details.url, 'http://office.reso.ru/');
+    assert.equal('domain' in details, false);
+});
+
 test('remote change: маркер гасит onChanged даже с другой формой домена', () => {
     const expected = new Map();
     remarkExpectedRemoteChange(expected, { domain: '.reso.ru', name: 's', path: '/' }, 1000);
@@ -160,6 +204,53 @@ test('remote change: маркер одноразовый и протухает �
     remarkExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 7000);
     assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 7000), true);
     assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 7001), false);
+});
+
+test('remote change: другое значение не подавляет локальное изменение', () => {
+    const expected = new Map();
+    const remote = { domain: 'reso.ru', name: 's', path: '/', value: 'server' };
+    const local = { domain: 'reso.ru', name: 's', path: '/', value: 'local' };
+
+    remarkExpectedRemoteChange(expected, remote, 1000);
+    assert.equal(isExpectedRemoteChange(expected, local, 5000, 2000), false);
+    assert.equal(isExpectedRemoteChange(expected, remote, 5000, 2001), true);
+});
+
+test('remote change: overwrite removal и addition подавляются как одна операция', () => {
+    const expected = new Map();
+    const remote = { domain: 'reso.ru', name: 's', path: '/', value: 'new' };
+    const removed = { domain: 'reso.ru', name: 's', path: '/', value: 'old' };
+
+    remarkExpectedRemoteChange(expected, remote, 1000);
+    assert.equal(
+        isExpectedRemoteChange(expected, removed, 5000, 1100, true, 'overwrite'),
+        true,
+    );
+    assert.equal(isExpectedRemoteChange(expected, remote, 5000, 1101), true);
+    assert.equal(isExpectedRemoteChange(expected, remote, 5000, 1102), false);
+});
+
+test('remote change: явное удаление с другим значением не подавляется', () => {
+    const expected = new Map();
+    const remote = { domain: 'reso.ru', name: 's', path: '/', value: 'new' };
+    const removed = { domain: 'reso.ru', name: 's', path: '/', value: 'old' };
+
+    remarkExpectedRemoteChange(expected, remote, 1000);
+    assert.equal(
+        isExpectedRemoteChange(expected, removed, 5000, 1100, true, 'explicit'),
+        false,
+    );
+});
+
+test('remote change: явное удаление ожидаемого значения тоже не подавляется', () => {
+    const expected = new Map();
+    const cookie = { domain: 'reso.ru', name: 's', path: '/', value: 'same' };
+
+    remarkExpectedRemoteChange(expected, cookie, 1000);
+    assert.equal(
+        isExpectedRemoteChange(expected, cookie, 5000, 1100, true, 'explicit'),
+        false,
+    );
 });
 
 test('cookieKey: разные path и name дают разные ключи', () => {

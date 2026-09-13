@@ -35,6 +35,11 @@ let expectedRemoteChanges = new Map();
 class CookieSyncClient {
     constructor() {
         this.pendingRequests = new Map();
+        this.remoteApplyQueue = Promise.resolve();
+        this.latestRevision = -1;
+        this.latestServerPayload = [];
+        this.remoteGeneration = 0;
+        this.remoteRetryTimeout = null;
     }
 
     generateUuid() {
@@ -52,6 +57,25 @@ class CookieSyncClient {
         return this.sendCommand('register', account, {});
     }
 
+    resetRemoteState() {
+        this.remoteGeneration += 1;
+        this.latestRevision = -1;
+        this.latestServerPayload = [];
+        clearTimeout(this.remoteRetryTimeout);
+        this.remoteRetryTimeout = null;
+    }
+
+    rejectPendingForSocket(failedSocket, error) {
+        for (const [uuid, pending] of this.pendingRequests) {
+            if (pending.socket !== failedSocket) {
+                continue;
+            }
+            clearTimeout(pending.timeout);
+            this.pendingRequests.delete(uuid);
+            pending.reject(error);
+        }
+    }
+
     async sendCommand(command, account, payload) {
         return new Promise((resolve, reject) => {
             if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -60,6 +84,7 @@ class CookieSyncClient {
             }
 
             const uuid = this.generateUuid();
+            const requestSocket = socket;
             const message = {
                 command,
                 account,
@@ -70,6 +95,7 @@ class CookieSyncClient {
             this.pendingRequests.set(uuid, {
                 resolve,
                 reject,
+                socket: requestSocket,
                 timeout: setTimeout(() => {
                     this.pendingRequests.delete(uuid);
                     reject(new Error('Request timeout'));
@@ -77,7 +103,7 @@ class CookieSyncClient {
             });
 
             try {
-                socket.send(JSON.stringify(message));
+                requestSocket.send(JSON.stringify(message));
             } catch (e) {
                 this.pendingRequests.delete(uuid);
                 reject(e);
@@ -85,61 +111,171 @@ class CookieSyncClient {
         });
     }
 
-    handleMessage(data) {
+    handleMessage(data, sourceSocket) {
         try {
             const response = JSON.parse(data);
-            const { uuid, result, payload, command, message } = response;
+            const { uuid, result, payload, command, message, revision } = response;
 
             if (command === 'set') {
-                this.handleSetCookies(payload);
+                this.handleSetCookies(payload, revision);
                 return;
             }
 
             if (uuid && this.pendingRequests.has(uuid)) {
                 const pending = this.pendingRequests.get(uuid);
+                if (pending.socket !== sourceSocket) {
+                    return;
+                }
                 clearTimeout(pending.timeout);
                 this.pendingRequests.delete(uuid);
 
                 if (result) {
-                    pending.resolve(payload);
-                    if (payload) {
-                        this.handleSetCookies(payload);
-                    }
+                    const shouldApply = payload && response.accepted !== true;
+                    const applyPromise = shouldApply
+                        ? this.handleSetCookies(payload, revision)
+                        : Promise.resolve(true);
+                    applyPromise.then(applied => pending.resolve({ ...response, applied }));
                 } else {
                     pending.reject(new Error(message || 'Request failed'));
                 }
+            } else if (uuid && Array.isArray(payload) && Number.isInteger(revision)) {
+                // Ответ мог прийти после локального timeout. Его серверная версия
+                // всё равно нужна для восстановления заблокированного клиента.
+                this.handleSetCookies(payload, revision);
             }
         } catch (e) {
             console.error('[CookieSync] Error parsing message:', e);
         }
     }
 
-    handleSetCookies(payload) {
+    handleSetCookies(payload, revision) {
         if (!Array.isArray(payload)) {
-            return;
+            return Promise.resolve();
         }
 
-        const promises = payload
-            .filter(cookie => isCookieForSync(cookie, currentCookieDomains))
-            .map(cookie => {
-                remarkExpectedRemoteChange(expectedRemoteChanges, cookie);
-                return this.setRemoteCookie(cookie);
-            });
+        const generation = this.remoteGeneration;
+        const cookies = selectSyncCookiePair(payload, currentCookieDomains);
+        if (!cookies.length) {
+            if (payload.length) {
+                console.error('[CookieSync] Server sent an incomplete or ambiguous cookie pair');
+            }
+            return Promise.resolve(false);
+        }
+        if (Number.isInteger(revision)) {
+            if (revision < this.latestRevision) {
+                return Promise.resolve(true);
+            }
+            if (revision > this.latestRevision) {
+                clearTimeout(this.remoteRetryTimeout);
+                this.remoteRetryTimeout = null;
+            }
+            this.latestRevision = revision;
+        }
+        this.latestServerPayload = cookies.map(cookie => ({ ...cookie }));
 
-        Promise.all(promises).then(() => {
+        const applyPayload = async () => {
+            if (generation !== this.remoteGeneration) {
+                return false;
+            }
+            if (Number.isInteger(revision) && revision < this.latestRevision) {
+                return true;
+            }
+
+            for (const cookie of cookies) {
+                let result = null;
+                for (let attempt = 0; attempt < 3 && !result; attempt += 1) {
+                    if (
+                        generation !== this.remoteGeneration
+                        || (Number.isInteger(revision) && revision < this.latestRevision)
+                    ) {
+                        return false;
+                    }
+                    remarkExpectedRemoteChange(expectedRemoteChanges, cookie);
+                    result = await this.setRemoteCookie(cookie);
+                    if (Number.isInteger(revision) && revision < this.latestRevision) {
+                        return true;
+                    }
+                    if (!result && attempt < 2) {
+                        await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+                    }
+                }
+                if (!result) {
+                    console.error('[CookieSync] Failed to apply the complete server cookie pair');
+                    this.scheduleRemoteRetry(cookies, revision, generation);
+                    return false;
+                }
+            }
+            if (generation !== this.remoteGeneration) {
+                return false;
+            }
             notifyStatusUpdate();
-        });
+            return true;
+        };
+
+        this.remoteApplyQueue = this.remoteApplyQueue
+            .catch(() => {})
+            .then(applyPayload);
+        return this.remoteApplyQueue;
+    }
+
+    scheduleRemoteRetry(cookies, revision, generation) {
+        if (
+            this.remoteRetryTimeout
+            || generation !== this.remoteGeneration
+            || (Number.isInteger(revision) && revision < this.latestRevision)
+        ) {
+            return;
+        }
+        this.remoteRetryTimeout = setTimeout(() => {
+            this.remoteRetryTimeout = null;
+            if (generation === this.remoteGeneration && isEnabled) {
+                this.handleSetCookies(cookies, revision);
+            }
+        }, 1000);
+    }
+
+    restoreLatestPair() {
+        if (this.latestServerPayload.length !== 2) {
+            return Promise.resolve(false);
+        }
+        return this.handleSetCookies(
+            this.latestServerPayload,
+            this.latestRevision,
+        );
     }
 
     async setRemoteCookie(cookie) {
         const fallbackDomain = (currentCookieDomains[0] || DEFAULT_COOKIE_DOMAINS[0]);
         try {
-            return await browser.cookies.set(buildCookieSetDetails(cookie, fallbackDomain));
+            const result = await browser.cookies.set(
+                buildCookieSetDetails(cookie, fallbackDomain)
+            );
+            const expectedValue = String(cookie.value !== undefined ? cookie.value : '');
+            const domainMatches = result
+                && normalizeDomain(result.domain) === normalizeDomain(cookie.domain);
+            const pathMatches = result
+                && result.path === (cookie.path || '/');
+            const hostOnlyMatches = result
+                && (
+                    cookie.hostOnly === undefined
+                    || result.hostOnly === cookie.hostOnly
+                );
+            if (
+                !result
+                || result.value !== expectedValue
+                || !domainMatches
+                || !pathMatches
+                || !hostOnlyMatches
+            ) {
+                throw new Error('Browser did not persist the expected cookie');
+            }
+            return result;
         } catch (e) {
             console.error(
                 `[CookieSync] Failed to set cookie "${cookie.name}":`,
                 e && e.message ? e.message : e
             );
+            return null;
         }
     }
 }
@@ -240,17 +376,32 @@ async function syncCookiesToServer() {
         }
     }
 
-    const payload = cookies
-        .filter(cookie => isCookieForSync(cookie, currentCookieDomains))
-        .map(pickCookieFields);
+    const pair = selectSyncCookiePair(cookies, currentCookieDomains);
+    const payload = pair.map(pickCookieFields);
 
-    if (!payload.length) {
+    if (payload.length !== 2) {
+        const restored = await client.restoreLatestPair();
+        console.warn(
+            restored
+                ? '[CookieSync] Incomplete local cookie pair was restored from server state'
+                : '[CookieSync] Cookie sync skipped: complete cookie pair is not available'
+        );
         return;
     }
 
     try {
-        await client.sendCommand('set', currentAccount, payload);
-        console.log(`[CookieSync] Sent ${payload.length} cookies to server`);
+        const response = await client.sendCommand('set', currentAccount, payload);
+        if (response.accepted === false) {
+            if (response.applied) {
+                console.log(
+                    `[CookieSync] Cookie update blocked for ${response.retry_after}s; server pair restored`
+                );
+            } else {
+                console.error('[CookieSync] Cookie update blocked, but server pair could not be restored');
+            }
+        } else {
+            console.log(`[CookieSync] Sent ${payload.length} cookies to server`);
+        }
     } catch (e) {
         console.error('[CookieSync] Failed to sync cookies to server:', e);
     }
@@ -276,7 +427,10 @@ browser.alarms.onAlarm.addListener((alarm) => {
 });
 
 function connect() {
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (socket && (
+        socket.readyState === WebSocket.OPEN
+        || socket.readyState === WebSocket.CONNECTING
+    )) {
         return;
     }
 
@@ -284,9 +438,14 @@ function connect() {
     setSyncPhase('connecting', currentServerUrl);
 
     try {
-        socket = new WebSocket(currentServerUrl);
+        const connection = new WebSocket(currentServerUrl);
+        socket = connection;
 
-        socket.addEventListener('open', async () => {
+        connection.addEventListener('open', async () => {
+            if (socket !== connection) {
+                connection.close();
+                return;
+            }
             console.log('[CookieSync] Connected');
             clearTimeout(reconnectTimeout);
             reconnectTimeout = null;
@@ -295,6 +454,7 @@ function connect() {
             if (currentAccount) {
                 setSyncPhase('registering', currentAccount);
                 try {
+                    client.resetRemoteState();
                     await client.register(currentAccount);
                     console.log('[CookieSync] Registered as:', currentAccount);
                     setSyncPhase('online', '');
@@ -307,12 +467,20 @@ function connect() {
             }
         });
 
-        socket.addEventListener('message', (event) => {
+        connection.addEventListener('message', (event) => {
+            if (socket !== connection) {
+                return;
+            }
             console.log('[CookieSync] Received:', event.data);
-            client.handleMessage(event.data);
+            client.handleMessage(event.data, connection);
         });
 
-socket.addEventListener('close', (event) => {
+        connection.addEventListener('close', (event) => {
+            if (socket !== connection) {
+                return;
+            }
+            socket = null;
+            client.rejectPendingForSocket(connection, new Error('Connection closed'));
             console.log('[CookieSync] Disconnected', event && event.code, event && event.reason);
             if (isEnabled) {
                 if (syncPhase !== 'error') {
@@ -330,8 +498,11 @@ socket.addEventListener('close', (event) => {
             }
         });
 
-        socket.addEventListener('error', () => {
-            const failedSocket = socket;
+        connection.addEventListener('error', () => {
+            if (socket !== connection) {
+                return;
+            }
+            const failedSocket = connection;
             setSyncPhase('error', `Ошибка соединения: не удалось подключиться к ${currentServerUrl}`);
             console.error(`[CookieSync] Socket error: не удалось подключиться к ${currentServerUrl}`);
 
@@ -360,42 +531,62 @@ function disconnect() {
     clearTimeout(syncDebounceTimer);
     syncDebounceTimer = null;
     if (socket) {
-        socket.close();
+        const closingSocket = socket;
         socket = null;
+        client.rejectPendingForSocket(closingSocket, new Error('Client disconnected'));
+        try {
+            closingSocket.close();
+        } catch (e) {
+            console.warn('[CookieSync] Failed to close socket cleanly:', e);
+        }
     }
+    client.resetRemoteState();
     setSyncPhase('idle', '');
 }
 
 async function diagnoseConnection(url) {
-    // WebSocket API не раскрывает причину обрыва (event.error пуст/нечитаем),
-    // поэтому пробуем тот же host:port простым HTTP-запросом и по результату
-    // строим осмысленное объяснение для пользователя.
+    // WebSocket API не сообщает причину ошибки. Проверяем тот же host:port
+    // сначала в ожидаемом, затем в альтернативном TLS-режиме.
+    let wsUrl;
     try {
-        const wsUrl = new URL(url);
-        const probeScheme = wsUrl.protocol === 'wss:' ? 'https' : 'http';
-        const probeUrl = `${probeScheme}//${wsUrl.host}/`;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 4000);
-        try {
-            const response = await fetch(probeUrl, {
-                cache: 'no-store',
-                redirect: 'manual',
-                signal: controller.signal,
-            });
-            clearTimeout(timer);
-            return `На ${wsUrl.host} отвечает HTTP-сервер (код ${response.status}); WebSocket не может подключиться — возможно, сервер запущен без TLS (${'ws'} вместо ${'wss'}) либо порт занят другой службой`;
-        } catch (fetchErr) {
-            clearTimeout(timer);
-            if (fetchErr && fetchErr.name === 'AbortError') {
-                return `${wsUrl.host} не отвечает (таймаут) — проверьте запущен ли сервер, правила сети и файрвол`;
-            }
-            if (wsUrl.protocol === 'wss:') {
-                return `Сертификат TLS недоверенный — браузер отклоняет wss://. Для самоподписанного сертификата запустите сервер с --no-tls и используйте ws://, либо добавьте сертификат в доверенные`;
-            }
-            return `Сервер на ${wsUrl.host} не отвечает — проверьте, запущен ли он и правильный ли порт (по умолчанию: 52314)`;
-        }
+        wsUrl = new URL(url);
     } catch (urlErr) {
-        return `Некорректный адрес сервера: ${url}`;
+        return describeConnectionFailure(url, null, null);
+    }
+
+    const usesTls = wsUrl.protocol === 'wss:';
+    const primaryScheme = usesTls ? 'https' : 'http';
+    const alternateScheme = usesTls ? 'http' : 'https';
+    const primary = await probeEndpoint(`${primaryScheme}://${wsUrl.host}/`);
+    let alternate = { status: null, timedOut: false };
+    if (primary.status === null) {
+        alternate = await probeEndpoint(`${alternateScheme}://${wsUrl.host}/`);
+    }
+    return describeConnectionFailure(
+        url,
+        primary.status,
+        alternate.status,
+        primary.timedOut || alternate.timedOut,
+    );
+}
+
+async function probeEndpoint(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+        const response = await fetch(url, {
+            cache: 'no-store',
+            redirect: 'manual',
+            signal: controller.signal,
+        });
+        return { status: response.status, timedOut: false };
+    } catch (error) {
+        return {
+            status: null,
+            timedOut: Boolean(error && error.name === 'AbortError'),
+        };
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -430,9 +621,12 @@ function setSyncPhase(phase, detail) {
 
 function handleSettingsChange(settings) {
     const { account, serverUrl: newServerUrl, enabled, cookieDomains, cookieDomain } = settings;
+    const wasEnabled = isEnabled;
+    let connectionSettingsChanged = false;
 
-    if (account !== undefined) {
+    if (account !== undefined && account !== currentAccount) {
         currentAccount = account;
+        connectionSettingsChanged = true;
     }
     if (cookieDomains !== undefined || cookieDomain !== undefined) {
         const parsed = parseDomains(cookieDomains !== undefined ? cookieDomains : cookieDomain);
@@ -440,20 +634,28 @@ function handleSettingsChange(settings) {
     }
     if (newServerUrl !== undefined && newServerUrl !== currentServerUrl) {
         currentServerUrl = newServerUrl;
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            disconnect();
-            setTimeout(connect, 100);
-        }
+        connectionSettingsChanged = true;
     }
-    if (enabled !== undefined && enabled !== isEnabled) {
+    if (enabled !== undefined) {
         isEnabled = enabled;
-        if (isEnabled) {
-            ensureKeepalive();
-            connect();
-        } else {
-            stopKeepalive();
+    }
+    if (!isEnabled) {
+        if (wasEnabled || socket) {
             disconnect();
         }
+        return;
+    }
+    ensureKeepalive();
+    if (connectionSettingsChanged && socket) {
+        disconnect();
+        ensureKeepalive();
+        setTimeout(() => {
+            if (isEnabled) {
+                connect();
+            }
+        }, 100);
+    } else if (!wasEnabled) {
+        connect();
     }
 }
 
@@ -507,7 +709,14 @@ browser.cookies.onChanged.addListener((changeInfo) => {
     if (!isCookieForSync(cookie, currentCookieDomains)) {
         return;
     }
-    if (isExpectedRemoteChange(expectedRemoteChanges, cookie, REMOTE_CHANGE_TTL_MS)) {
+    if (isExpectedRemoteChange(
+        expectedRemoteChanges,
+        cookie,
+        REMOTE_CHANGE_TTL_MS,
+        Date.now(),
+        changeInfo.removed,
+        changeInfo.cause,
+    )) {
         return;
     }
     scheduleCookieSync();

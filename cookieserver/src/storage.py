@@ -1,18 +1,32 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 from websockets.asyncio.server import ServerConnection
 
 from cookieserver.src.errors import StorageError
-from cookieserver.src.settings import ACCOUNTS_PATH, COOKIE_TIMEOUT
+from cookieserver.src.settings import (
+    ACCOUNTS_PATH,
+    COOKIE_UPDATE_INTERVAL,
+    ENCODING,
+)
 
 logger = logging.getLogger(__name__)
 
-SYNC_COOKIE_NAMES = frozenset({'ResoOffice60', 'ASP.NET_SessionId'})
+SYNC_COOKIE_ORDER = ('ASP.NET_SessionId', 'ResoOffice60')
+SYNC_COOKIE_NAMES = frozenset(SYNC_COOKIE_ORDER)
+
+
+@dataclass(frozen=True)
+class CookieUpdateResult:
+    accepted: bool
+    changed: bool
+    retry_after: int
 
 
 def filter_sync_cookies(payload: object) -> List[Dict]:
@@ -24,33 +38,108 @@ def filter_sync_cookies(payload: object) -> List[Dict]:
     ]
 
 
+def require_complete_cookie_pair(payload: object) -> List[Dict]:
+    cookies = filter_sync_cookies(payload)
+    names = [cookie.get('name') for cookie in cookies]
+    if len(cookies) != len(SYNC_COOKIE_NAMES) or set(names) != SYNC_COOKIE_NAMES:
+        required = ', '.join(sorted(SYNC_COOKIE_NAMES))
+        raise StorageError(f'Cookie payload must contain exactly one of each: {required}')
+    for cookie in cookies:
+        if not isinstance(cookie.get('value'), str) or not cookie['value']:
+            raise StorageError(f"Cookie {cookie['name']} must have a non-empty string value")
+        domain = cookie.get('domain')
+        if not isinstance(domain, str) or not domain.strip():
+            raise StorageError(f"Cookie {cookie['name']} must have a domain")
+        path = cookie.get('path')
+        if not isinstance(path, str) or not path.startswith('/'):
+            raise StorageError(f"Cookie {cookie['name']} must have a path")
+        for field in ('secure', 'httpOnly', 'hostOnly'):
+            if field in cookie and not isinstance(cookie[field], bool):
+                raise StorageError(f"Cookie {cookie['name']} has invalid {field}")
+        if 'sameSite' in cookie and cookie['sameSite'] not in {
+            'no_restriction', 'lax', 'strict', 'unspecified',
+        }:
+            raise StorageError(f"Cookie {cookie['name']} has invalid sameSite")
+        if 'expirationDate' in cookie:
+            expiration = cookie['expirationDate']
+            if (
+                not isinstance(expiration, (int, float))
+                or isinstance(expiration, bool)
+                or not math.isfinite(expiration)
+                or expiration <= time.time()
+            ):
+                raise StorageError(
+                    f"Cookie {cookie['name']} has invalid expirationDate"
+                )
+    cookies_by_name = {cookie['name']: cookie for cookie in cookies}
+    return [cookies_by_name[name] for name in SYNC_COOKIE_ORDER]
+
+
 class Account:
 
-    def __init__(self, name, payload):
+    def __init__(self, name, payload, updated_at=0.0, revision=0):
         self.name = name
         self.payload = payload
-        self.updated_at = 0.0
+        self.updated_at = updated_at
+        self.revision = revision
+        elapsed = max(0.0, time.time() - self.updated_at)
+        remaining = max(0.0, COOKIE_UPDATE_INTERVAL - elapsed)
+        self._locked_until = time.monotonic() + remaining
         filename = f'{self.name}.json'
         self.full_path = os.path.join(ACCOUNTS_PATH, filename)
         self.lock = asyncio.Lock()
 
-    def set_payload(self, payload) -> bool:
+    def retry_after(self) -> int:
+        remaining = self._locked_until - time.monotonic()
+        return max(0, math.ceil(remaining))
+
+    def set_payload(self, payload) -> CookieUpdateResult:
         if payload == self.payload:
-            return False
-        now = time.time()
-        if now - self.updated_at < COOKIE_TIMEOUT:
-            remaining = int(COOKIE_TIMEOUT - (now - self.updated_at))
-            raise StorageError(
-                f'Rate limit: try again in {remaining}s'
+            return CookieUpdateResult(
+                accepted=True,
+                changed=False,
+                retry_after=self.retry_after(),
             )
+        retry_after = self.retry_after()
+        if retry_after:
+            return CookieUpdateResult(
+                accepted=False,
+                changed=False,
+                retry_after=retry_after,
+            )
+        now = time.time()
+        previous_payload = self.payload
+        previous_updated_at = self.updated_at
+        previous_revision = self.revision
+        previous_locked_until = self._locked_until
         self.updated_at = now
         self.payload = payload
-        self.write_file()
-        return True
+        self.revision += 1
+        self._locked_until = time.monotonic() + COOKIE_UPDATE_INTERVAL
+        try:
+            self.write_file()
+        except OSError:
+            self.payload = previous_payload
+            self.updated_at = previous_updated_at
+            self.revision = previous_revision
+            self._locked_until = previous_locked_until
+            raise
+        return CookieUpdateResult(
+            accepted=True,
+            changed=True,
+            retry_after=COOKIE_UPDATE_INTERVAL,
+        )
 
     def write_file(self):
-        with open(self.full_path, 'w') as f:
-            f.write(json.dumps(self.payload))
+        document = {
+            'payload': self.payload,
+            'updated_at': self.updated_at,
+            'revision': self.revision,
+        }
+        temp_path = f'{self.full_path}.tmp'
+        with open(temp_path, 'w', encoding=ENCODING) as file_obj:
+            json.dump(document, file_obj)
+        os.replace(temp_path, self.full_path)
 
     def remove_file(self):
         if os.path.exists(self.full_path):
@@ -97,16 +186,50 @@ class AccountStorage:
             path = os.path.join(ACCOUNTS_PATH, filename)
 
             try:
-                with open(path) as f:
-                    payload = json.load(f)
+                with open(path, encoding=ENCODING) as file_obj:
+                    document = json.load(file_obj)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Skipping unreadable account file {path}: {e}")
                 continue
 
-            filtered_payload = filter_sync_cookies(payload)
-            account = Account(name, filtered_payload)
+            if isinstance(document, dict):
+                payload = document.get('payload', [])
+                updated_at = document.get('updated_at', 0.0)
+                revision = document.get('revision', 0)
+            else:
+                payload = document
+                updated_at = 0.0
+                revision = 0
+
+            try:
+                filtered_payload = (
+                    require_complete_cookie_pair(payload) if payload else []
+                )
+            except StorageError:
+                filtered_payload = []
+            if (
+                not isinstance(updated_at, (int, float))
+                or isinstance(updated_at, bool)
+                or not math.isfinite(updated_at)
+                or updated_at < 0
+            ):
+                updated_at = 0.0
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+                revision = 0
+            if not filtered_payload:
+                updated_at = 0.0
+                revision = 0
+            elif updated_at > time.time():
+                updated_at = time.time()
+
+            account = Account(name, filtered_payload, float(updated_at), revision)
             self._accounts[name] = account
-            if filtered_payload != payload:
+            expected_document = {
+                'payload': filtered_payload,
+                'updated_at': float(updated_at),
+                'revision': revision,
+            }
+            if document != expected_document:
                 try:
                     account.write_file()
                 except OSError as e:
@@ -127,7 +250,10 @@ class AccountStorage:
     def add_account(self, account_name: str, payload: Optional[List[Dict]] = None) -> None:
         if self.get_account(account_name):
             raise StorageError(f"Cannot add an existing account {account_name} so it cannot be added")
-        account = Account(account_name, payload=filter_sync_cookies(payload or []))
+        account = Account(
+            account_name,
+            payload=require_complete_cookie_pair(payload) if payload else [],
+        )
         account.write_file()
         self._accounts[account_name] = account
 
@@ -143,6 +269,8 @@ class AccountStorage:
         # for client in clients:
         #     client.writer.close()
 
-    def set_cookies(self, account_name: str, payload: List[Dict]) -> bool:
+    def set_cookies(
+        self, account_name: str, payload: List[Dict],
+    ) -> CookieUpdateResult:
         account = self.require_account(account_name)
-        return account.set_payload(filter_sync_cookies(payload))
+        return account.set_payload(require_complete_cookie_pair(payload))

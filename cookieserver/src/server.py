@@ -13,6 +13,7 @@ from cookieserver.src.request import Request
 from cookieserver.src.settings import (
     CERT_PATH,
     KEY_PATH,
+    MAX_SIZE,
     PING_INTERVAL,
     PING_TIMEOUT,
 )
@@ -79,13 +80,14 @@ class Server:
         self.storage = AccountStorage()
 
     async def _connection_processor(self, websocket: ServerConnection) -> None:
-        logger.info(f"Client connected: {websocket.remote_address}")
+        remote_address = websocket.remote_address
+        logger.info(f"Client connected: {remote_address}")
         try:
             async for message in websocket:
                 await self._handle_message(websocket, message)
         finally:
             self.storage.remove_client(websocket)
-            logger.info(f"Client disconnected: {websocket.remote_address}")
+            logger.info(f"Client disconnected: {remote_address}")
 
     async def _handle_message(
         self,
@@ -181,6 +183,7 @@ class Server:
             ssl=ssl_context,
             ping_interval=PING_INTERVAL,
             ping_timeout=PING_TIMEOUT,
+            max_size=MAX_SIZE,
             logger=HandshakeFriendlyLogger(logger, self.use_tls),
         )
 
