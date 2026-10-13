@@ -14,16 +14,24 @@ CookieSync — это инструмент для совместного и мн
 
 Поддерживаемые браузеры: Firefox, Edge, Chrome
 
-### Установка:
+### Установка и запуск сервера
+
+**Windows:** [пошаговая инструкция](cookieserver/WINDOWS.md) — установка Python,
+настройка аккаунтов, firewall, TLS и автозапуск через Планировщик заданий.
+Готовый шаблон: [server_config.windows.conf.example](cookieserver/server_config.windows.conf.example).
+
+Зависимости сервера находятся в `cookieserver/requirements.txt`.
+Команды выполняются из корня проекта с установленными зависимостями:
+
 ```bash
-git clone https://github.com/the-repo-hub/CookieSync
-cd СookieSync
-pip install -r requirements.txt
+python -m pip install -r cookieserver/requirements.txt
+python -m cookieserver.manage --help
+python -m cookieserver.manage runserver
 ```
 
-### Запуск
-```bash
-python -m src.main
-```
+Сервер читает `cookieserver/server_config.conf`. По умолчанию включён TLS:
+нужны PEM-сертификат и ключ. Для проверки в доверенной локальной сети
+используйте `python -m cookieserver.manage runserver --no-tls` и URL `ws://`.
+
 ## License  
-This project is proprietary. Unauthorized use is prohibited.  
+This project is proprietary. Unauthorized use is prohibited.

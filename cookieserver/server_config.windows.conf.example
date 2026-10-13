@@ -1,0 +1,28 @@
+[server]
+; Copy this file to cookieserver/server_config.conf before starting the server.
+; The server reads only server_config.conf; there is no --config option.
+
+; Listen on all IPv4 interfaces. Use 127.0.0.1 for this computer only.
+host = 0.0.0.0
+port = 52314
+
+; WebSocket protocol ping/pong, in seconds.
+ping_interval = 30
+ping_timeout = 10
+broadcast_timeout = 5
+
+; TLS is enabled by default. For a LAN test, start with runserver --no-tls.
+; To use your own TLS files, uncomment and adjust these absolute paths.
+; Use forward slashes and no surrounding quotes, even for paths with spaces.
+; cert = C:/CookieSync/cookieserver/keys/fullchain.pem
+; key = C:/CookieSync/cookieserver/keys/privkey.pem
+; Without these options, TLS uses cookieserver/keys/cert.pem and key.pem.
+; Certificate files must be provisioned separately; startup does not create them.
+
+; Minimum interval between different cookie pairs for an account, in seconds.
+cookie_update_interval = 300
+
+; Maximum incoming message size, in bytes.
+max_size = 16384
+encoding = utf-8
+log_level = INFO
