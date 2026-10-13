@@ -116,7 +116,7 @@ function updateStatusDisplay(connected, enabled, phase, detail, error) {
 async function loadSettings() {
     const settings = await browser.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain']);
     accountInput.value = settings.account || '';
-    serverUrlInput.value = settings.serverUrl || 'wss://localhost:52314';
+    serverUrlInput.value = settings.serverUrl || 'ws://mnas:52314';
     const rawDomains = settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain;
     cookieDomainInput.value = Array.isArray(rawDomains) ? rawDomains.join(', ') : (rawDomains || '.reso.ru');
     enableToggle.checked = settings.enabled === true;

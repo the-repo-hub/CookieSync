@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CookieSync Extension",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Синхронизация куки между браузерами через WebSocket сервер",
   "minimum_chrome_version": "121",
   "permissions": ["storage", "cookies", "alarms", "scripting"],
@@ -15,7 +15,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://office.reso.ru/*"],
+      "matches": ["*://*.reso.ru/*"],
       "js": ["browser-polyfill.min.js", "authentication.js"],
       "run_at": "document_idle"
     }
@@ -23,12 +23,16 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "CookieSync",
-    "default_icon": "icon.ico"
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "icons": {
-    "16": "icon.ico",
-    "48": "icon.ico",
-    "128": "icon.ico"
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
   },
   "browser_specific_settings": {
     "gecko": {

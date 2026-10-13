@@ -1,4 +1,4 @@
-const DEFAULT_SERVER_URL = 'wss://localhost:52314';
+const DEFAULT_SERVER_URL = 'ws://mnas:52314';
 const DEFAULT_COOKIE_DOMAINS = ['.reso.ru'];
 const RECONNECT_DELAY = 5000;
 const REQUEST_TIMEOUT = 10000;
@@ -533,7 +533,7 @@ function connect() {
             if (socket !== connection) {
                 return;
             }
-            console.log('[CookieSync] Received:', event.data);
+            console.debug('[CookieSync] Received WebSocket message');
             client.handleMessage(event.data, connection);
         });
 
