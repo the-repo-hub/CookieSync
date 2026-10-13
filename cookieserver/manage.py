@@ -1,12 +1,10 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
-import logging
 import os
 import sys
 from typing import List
 
-from cookieserver.src.errors import StorageError
 from cookieserver.src.server import Server
 from cookieserver.src.settings import (
     CERT_PATH,
@@ -67,21 +65,6 @@ class RunServerCommand(BaseCommand):
             pass
 
 
-class CreateAccountCommand(BaseCommand):
-    name = "create_account"
-    help = "Create a new account"
-
-    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("name")
-
-    def handle(self, args: argparse.Namespace) -> None:
-        storage = AccountStorage()
-        if storage.get_account(args.name):
-            raise SystemExit(f"Error: account '{args.name}' already exists")
-        storage.add_account(args.name)
-        print(f"Account '{args.name}' created")
-
-
 class ListAccountsCommand(BaseCommand):
     name = "list_accounts"
     help = "List existing accounts"
@@ -96,22 +79,6 @@ class ListAccountsCommand(BaseCommand):
             print(name)
 
 
-class RemoveAccountCommand(BaseCommand):
-    name = "remove_account"
-    help = "Remove an account"
-
-    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("name")
-
-    def handle(self, args: argparse.Namespace) -> None:
-        storage = AccountStorage()
-        try:
-            storage.remove_account(args.name)
-        except StorageError as e:
-            raise SystemExit(f"Error: {e}")
-        print(f"Account '{args.name}' removed")
-
-
 class HelpCommand(BaseCommand):
     name = "help"
     help = "Show available commands"
@@ -122,9 +89,7 @@ class HelpCommand(BaseCommand):
 
 COMMANDS: List[BaseCommand] = [
     RunServerCommand(),
-    CreateAccountCommand(),
     ListAccountsCommand(),
-    RemoveAccountCommand(),
     HelpCommand(),
 ]
 

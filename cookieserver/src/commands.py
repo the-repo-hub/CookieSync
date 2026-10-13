@@ -30,7 +30,7 @@ def register_command(name: str):
 class RegisterCookiesCommand(Command):
 
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
-        account = storage.require_account(request.account)
+        account = await storage.get_or_create_account(request.account)
         async with account.lock:
             storage.add_client(websocket, account.name)
             logger.info(f"Client {websocket.remote_address} registered in account {account.name}")

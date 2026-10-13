@@ -18,7 +18,7 @@ from cookieserver.src.settings import (
     COOKIE_UPDATE_INTERVAL,
     KEYS_PATH,
 )
-from cookieserver.src.storage import AccountStorage
+from cookieserver.src.storage import Account, AccountStorage
 from cookieserver.tests.AsyncWSClient import AsyncWSClient
 
 HOST = '127.0.0.1'
@@ -44,19 +44,18 @@ def asset_dirs():
         )
 
 
-@pytest.fixture(scope='session', autouse=True)
-def temp_accounts_storage(tmp_path_factory):
+@pytest.fixture(autouse=True)
+def temp_accounts_storage(tmp_path, monkeypatch):
     """Изолирует тесты от реальной папки cookieserver/accounts/.
 
     Иначе серверные/менеджмент-тесты пишут account-файлы прямо в рабочее
     хранилище (например, custom_cert_account.json, post_tls_account.json).
     """
-    accounts_dir = tmp_path_factory.mktemp('accounts')
-    mpatch = pytest.MonkeyPatch()
-    mpatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
-    mpatch.setattr('cookieserver.tests.test_cookieserver.ACCOUNTS_PATH', str(accounts_dir))
-    yield accounts_dir
-    mpatch.undo()
+    accounts_dir = tmp_path / 'server_accounts'
+    accounts_dir.mkdir()
+    monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
+    monkeypatch.setattr('cookieserver.tests.test_cookieserver.ACCOUNTS_PATH', str(accounts_dir))
+    return accounts_dir
 
 
 @pytest.fixture
@@ -128,33 +127,18 @@ def cookies_other():
 
 
 @pytest.fixture
-def not_storage_account(server):
-    account = 'test_to_create'
-    yield account
-    if account in server.storage.get_all_accounts():
-        server.storage.remove_account(account)
+def not_storage_account():
+    return 'test_to_create'
 
 
 @pytest.fixture
-def other_account(server):
-    name = 'other_account'
-    if name in server.storage.get_all_accounts():
-        server.storage.remove_account(name)
-    server.storage.add_account(name)
-    yield name
-    if name in server.storage.get_all_accounts():
-        server.storage.remove_account(name)
+def other_account():
+    return 'other_account'
 
 
 @pytest.fixture
-def account(server):
-    test_account_name = 'test_account'
-    if test_account_name in server.storage.get_all_accounts():
-        server.storage.remove_account(test_account_name)
-    server.storage.add_account(test_account_name)
-    yield test_account_name
-    if test_account_name in server.storage.get_all_accounts():
-        server.storage.remove_account(test_account_name)
+def account():
+    return 'test_account'
 
 
 def register_payload(account):
@@ -251,25 +235,191 @@ class TestCookieServer:
         assert not server.storage._ws_accounts
 
     @pytest.mark.asyncio
-    async def test_register_failed(self, server, async_client, not_storage_account):
-        # аккаунта нет на сервере, регистрация должна провалиться
+    async def test_register_creates_account(self, server, async_client, not_storage_account):
+        assert server.storage.get_account(not_storage_account) is None
         response = await async_client.send_request(register_payload(not_storage_account))
-        assert response[Fields.result] is False
-        assert not_storage_account in response[Fields.message]
+        assert response[Fields.result] is True
         assert response[Fields.uuid] == async_client.last_request_uuid
-        assert not server.storage.websockets_by_account.get(not_storage_account)
+        assert response[Fields.payload] == []
+        assert response[Fields.revision] == 0
+        assert response[Fields.retry_after] == 0
+        assert len(server.storage.websockets_by_account[not_storage_account]) == 1
+        persisted = AccountStorage().require_account(not_storage_account)
+        assert persisted.payload == []
+        assert persisted.revision == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_registration_creates_one_account(
+        self, server, account, async_client, second_client, cookies_not_sample,
+    ):
+        with patch.object(Account, 'write_file', autospec=True, side_effect=Account.write_file) as write:
+            first, second = await asyncio.gather(
+                async_client.send_request(register_payload(account)),
+                second_client.send_request(register_payload(account)),
+            )
+        assert first[Fields.result] is second[Fields.result] is True
+        assert first[Fields.uuid] == async_client.last_request_uuid
+        assert second[Fields.uuid] == second_client.last_request_uuid
+        assert first[Fields.payload] == second[Fields.payload] == []
+        assert write.call_count == 1
+        assert server.storage.get_all_accounts() == [account]
+        assert len(server.storage.websockets_by_account[account]) == 2
+
+        response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.accepted] is True
+        push = await second_client.recv_server_message()
+        assert push[Fields.payload] == cookies_not_sample
+        assert Fields.uuid not in push
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('name', [
+        None, '', '   ', 123, ['office'], {'name': 'office'},
+        '../outside', '..', '/absolute', r'..\outside', 'a/b', r'a\b',
+        'a:b', 'name\x00', 'name\n', 'name.', 'a' * 65, 'CON', 'nul', 'COM1', 'LPT¹',
+    ])
+    async def test_register_rejects_invalid_account_name(
+        self, server, async_client, name, temp_accounts_storage,
+    ):
+        response = await async_client.send_request(register_payload(name))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert 'account' in response[Fields.message].lower()
+        assert server.storage.get_all_accounts() == []
+        assert not server.storage.websockets_by_account
+        assert list(temp_accounts_storage.iterdir()) == []
+        # A validation error must not close the connection.
+        valid = await async_client.send_request(register_payload('office_team'))
+        assert valid[Fields.result] is True
+
+    @pytest.mark.asyncio
+    async def test_register_creates_missing_directory(
+        self, server, async_client, tmp_path, monkeypatch,
+    ):
+        missing = tmp_path / 'new' / 'accounts'
+        monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(missing))
+        response = await async_client.send_request(register_payload('Офис_1'))
+        assert response[Fields.result] is True
+        assert (missing / 'Офис_1.json').is_file()
+
+    @pytest.mark.asyncio
+    async def test_failed_account_creation_can_be_retried(
+        self, server, async_client, account, temp_accounts_storage,
+    ):
+        with patch.object(Account, 'write_file', side_effect=OSError('private disk error')):
+            response = await async_client.send_request(register_payload(account))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert response[Fields.message] == 'Internal server error'
+        assert server.storage.get_account(account) is None
+        assert not server.storage.websockets_by_account
+        assert list(temp_accounts_storage.iterdir()) == []
+
+        retry = await async_client.send_request(register_payload(account))
+        assert retry[Fields.result] is True
+        assert AccountStorage().get_account(account) is not None
+
+    @pytest.mark.asyncio
+    async def test_register_preserves_existing_file_after_restart(
+        self, server, async_client, account, cookies_not_sample, temp_accounts_storage,
+    ):
+        await async_client.send_request(register_payload(account))
+        update = await async_client.send_request(set_payload(account, cookies_not_sample))
+        account_file = temp_accounts_storage / f'{account}.json'
+        before = account_file.read_bytes()
+        await async_client.close()
+        await server.stop()
+
+        restarted = Server(HOST, 0, use_tls=False)
+        await restarted.start()
+        try:
+            port = restarted.server.sockets[0].getsockname()[1]
+            await async_client.connect(f'ws://{HOST}:{port}')
+            response = await async_client.send_request(register_payload(account))
+            assert response[Fields.result] is True
+            assert response[Fields.uuid] == async_client.last_request_uuid
+            assert response[Fields.payload] == cookies_not_sample
+            assert response[Fields.revision] == update[Fields.revision]
+            assert response[Fields.retry_after] > 0
+            assert account_file.read_bytes() == before
+        finally:
+            await async_client.close()
+            await restarted.stop()
+
+    @pytest.mark.asyncio
+    async def test_register_does_not_overwrite_unreadable_account(
+        self, server, async_client, temp_accounts_storage,
+    ):
+        path = temp_accounts_storage / 'corrupt.json'
+        path.write_text('{broken json')
+        response = await async_client.send_request(register_payload('corrupt'))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert path.read_text() == '{broken json'
+        assert server.storage.get_account('corrupt') is None
+        assert not server.storage.websockets_by_account
+
+    @pytest.mark.asyncio
+    async def test_cancelled_creation_finishes_before_retry(self, server, monkeypatch):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        to_thread = asyncio.to_thread
+        writes = []
+
+        async def delayed_write(function, account_obj):
+            writes.append(account_obj)
+            started.set()
+            await release.wait()
+            return await to_thread(function, account_obj)
+
+        monkeypatch.setattr('cookieserver.src.storage.asyncio.to_thread', delayed_write)
+        first = asyncio.create_task(server.storage.get_or_create_account('cancelled'))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            first.cancel()
+            second = asyncio.create_task(server.storage.get_or_create_account('cancelled'))
+        finally:
+            release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(first, second, return_exceptions=True), timeout=2,
+        )
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert results[1] is server.storage.require_account('cancelled')
+        assert writes == [results[1]]
+        assert AccountStorage().get_account('cancelled') is not None
+
+    @pytest.mark.asyncio
+    async def test_register_reuses_legacy_account_name(
+        self, temp_accounts_storage, async_client, server,
+    ):
+        path = temp_accounts_storage / 'legacy.office.json'
+        document = {'payload': [], 'updated_at': 0.0, 'revision': 0}
+        path.write_text(json.dumps(document))
+        server.storage = AccountStorage()
+        with patch.object(Account, 'write_file', side_effect=AssertionError('must reuse existing file')):
+            response = await async_client.send_request(register_payload('legacy.office'))
+        assert response[Fields.result] is True
+        assert response[Fields.payload] == []
+        assert json.loads(path.read_text()) == document
 
     @pytest.mark.asyncio
     async def test_register_waits_for_account_lock(self, server, account, async_client):
         """Второй клиент должен ждать, пока аккаунт залочен."""
-        account_obj = server.storage.require_account(account)
+        account_obj = await server.storage.get_or_create_account(account)
+        waiter_arrived = asyncio.Event()
+
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():
+                    waiter_arrived.set()
+                return await super().acquire()
+
+        account_obj.lock = ObservedLock()
         await account_obj.lock.acquire()
         try:
             register_task = asyncio.create_task(
                 async_client.send_request(register_payload(account))
             )
-            # даём запросу дойти до блокировки на аккаунте
-            await asyncio.sleep(0.1)
+            await asyncio.wait_for(waiter_arrived.wait(), timeout=1)
             assert not register_task.done()
             assert not server.storage.websockets_by_account.get(account)
         finally:
@@ -527,7 +677,7 @@ class TestCookieServer:
         self, server, cookies_not_sample, account, async_client,
     ):
         await async_client.send_request(register_payload(account))
-        account_obj = server.storage.require_account(account)
+        account_obj: Account = server.storage.require_account(account)
         previous_payload = account_obj.payload
         previous_updated_at = account_obj.updated_at
         previous_revision = account_obj.revision
@@ -699,6 +849,7 @@ class TestCookieServer:
         assert response[Fields.result] is False
         assert response[Fields.uuid] == async_client.last_request_uuid
         assert 'does not exist' in response[Fields.message]
+        assert server.storage.get_account(missing) is None
 
     @pytest.mark.asyncio
     async def test_server_push_has_command_set_and_no_uuid(
@@ -790,9 +941,6 @@ class TestCookieServer:
         port = plain_server.server.sockets[0].getsockname()[1]
 
         account_name = 'post_tls_account'
-        if account_name in plain_server.storage.get_all_accounts():
-            plain_server.storage.remove_account(account_name)
-        plain_server.storage.add_account(account_name)
 
         # Отправляем TLS ClientHello в незашифрованный сервер
         reader, writer = await asyncio.open_connection(HOST, port)
@@ -852,9 +1000,6 @@ class TestCookieServer:
             await client.connect(f'wss://{HOST}:{port}')
             try:
                 account_name = 'custom_cert_account'
-                if account_name in srv.storage.get_all_accounts():
-                    srv.storage.remove_account(account_name)
-                srv.storage.add_account(account_name)
                 response = await client.send_request(register_payload(account_name))
                 assert response[Fields.result] is True
             finally:
@@ -864,7 +1009,7 @@ class TestCookieServer:
 
 
 class TestManagementCommands:
-    """Тесты management-команд manage.py (create/list/remove_account, runserver)."""
+    """Тесты management-команд manage.py (list_accounts, runserver)."""
 
     @pytest.fixture
     def manage_assets(self, tmp_path, monkeypatch):
@@ -873,21 +1018,17 @@ class TestManagementCommands:
         monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
         return accounts_dir
 
-    def test_create_account(self, manage_assets):
-        args = build_parser().parse_args(['create_account', 'alice'])
-        args.handler(args)
-        assert (manage_assets / 'alice.json').is_file()
-        assert AccountStorage().get_account('alice') is not None
+    @pytest.mark.parametrize('command', ['create_account', 'remove_account'])
+    def test_manual_account_commands_are_removed(self, command):
+        with pytest.raises(SystemExit) as error:
+            build_parser().parse_args([command, 'alice'])
+        assert error.value.code == 2
 
-    def test_create_account_existing_raises(self, manage_assets):
-        AccountStorage().add_account('alice')
-        args = build_parser().parse_args(['create_account', 'alice'])
-        with pytest.raises(SystemExit):
-            args.handler(args)
-
-    def test_list_accounts(self, manage_assets, capsys):
-        AccountStorage().add_account('alice')
-        AccountStorage().add_account('bob')
+    @pytest.mark.asyncio
+    async def test_list_accounts(self, manage_assets, capsys):
+        storage = AccountStorage()
+        await storage.get_or_create_account('alice')
+        await storage.get_or_create_account('bob')
         args = build_parser().parse_args(['list_accounts'])
         args.handler(args)
         out = capsys.readouterr().out
@@ -899,26 +1040,14 @@ class TestManagementCommands:
         args.handler(args)
         assert 'No accounts' in capsys.readouterr().out
 
-    def test_remove_account(self, manage_assets):
-        AccountStorage().add_account('alice')
-        args = build_parser().parse_args(['remove_account', 'alice'])
-        args.handler(args)
-        assert not (manage_assets / 'alice.json').exists()
-        assert AccountStorage().get_all_accounts() == []
-
-    def test_remove_account_missing_raises(self, manage_assets):
-        args = build_parser().parse_args(['remove_account', 'ghost'])
-        with pytest.raises(SystemExit):
-            args.handler(args)
-
     def test_help_command_lists_commands(self, manage_assets, capsys):
         args = build_parser().parse_args(['help'])
         args.handler(args)
         out = capsys.readouterr().out
         assert 'runserver' in out
-        assert 'create_account' in out
+        assert 'create_account' not in out
         assert 'list_accounts' in out
-        assert 'remove_account' in out
+        assert 'remove_account' not in out
 
     def test_runserver_defaults_to_tls(self, manage_assets):
         args = build_parser().parse_args(['runserver', '--port', '0'])

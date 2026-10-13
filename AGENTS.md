@@ -97,7 +97,9 @@ Do not replace this with large `if/elif` chains.
 
 `register`:
 
-* validates that account exists;
+* validates the account name and gets or creates the account atomically;
+* persists a newly created empty account before successful registration;
+* reuses existing accounts, cookies, revisions and update intervals;
 * acquires `account.lock`;
 * adds websocket to `websockets_by_account[account]`;
 * returns current cookies for the account.

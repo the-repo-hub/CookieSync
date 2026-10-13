@@ -19,5 +19,7 @@ class Request:
             raise HandleCommandError("No command specified")
         if not self.account:
             raise HandleCommandError("No account specified")
+        if not isinstance(self.account, str) or not self.account.strip():
+            raise HandleCommandError("Account name must be a non-empty string")
         if not self.uuid:
             raise HandleCommandError("No uuid specified")

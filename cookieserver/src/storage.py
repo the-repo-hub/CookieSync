@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
@@ -20,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 SYNC_COOKIE_ORDER = ('ASP.NET_SessionId', 'ResoOffice60')
 SYNC_COOKIE_NAMES = frozenset(SYNC_COOKIE_ORDER)
+RESERVED_ACCOUNT_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{i}' for i in '123456789¹²³'),
+    *(f'LPT{i}' for i in '123456789¹²³'),
+}
 
 
 @dataclass(frozen=True)
@@ -141,16 +147,12 @@ class Account:
             json.dump(document, file_obj)
         os.replace(temp_path, self.full_path)
 
-    def remove_file(self):
-        if os.path.exists(self.full_path):
-            os.remove(self.full_path)
-        else:
-            raise StorageError(f'File with path {self.full_path} does not exist')
 
 class AccountStorage:
 
     def __init__(self):
         self._accounts: Dict[str, Account] = {}
+        self._creation_lock = asyncio.Lock()
         self.websockets_by_account: Dict[str, Set[ServerConnection]] = {}
         self._ws_accounts: Dict[ServerConnection, str] = {}
         self._load_accounts()
@@ -247,27 +249,50 @@ class AccountStorage:
             return account
         raise StorageError(f"Account {account_name} does not exist")
 
-    def add_account(self, account_name: str, payload: Optional[List[Dict]] = None) -> None:
-        if self.get_account(account_name):
-            raise StorageError(f"Cannot add an existing account {account_name} so it cannot be added")
-        account = Account(
-            account_name,
-            payload=require_complete_cookie_pair(payload) if payload else [],
-        )
+    async def get_or_create_account(self, account_name: str) -> Account:
+        if not isinstance(account_name, str) or not account_name.strip():
+            raise StorageError('Account name must be a non-empty string')
+        if account := self.get_account(account_name):
+            return account
+        # Existing accounts retain their names; new names must be safe filenames
+        # on both Linux and Windows (including reserved Windows device names).
+        if (
+            not re.fullmatch(r'[\w-]{1,64}', account_name)
+            or len(account_name.encode('utf-8')) > 200
+            or account_name.upper() in RESERVED_ACCOUNT_NAMES
+        ):
+            raise StorageError(
+                'Invalid account name: use 1-64 letters, digits, underscores or hyphens; '
+                'reserved device names are not allowed'
+            )
+        async with self._creation_lock:
+            if account := self.get_account(account_name):
+                return account
+            account = Account(account_name, [])
+            async with account.lock:
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(self._persist_new_account, account)
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    # A filesystem write cannot be cancelled. Finish it before
+                    # releasing the creation lock so another client can reuse it.
+                    await write_task
+                    self._accounts[account_name] = account
+                    raise
+                self._accounts[account_name] = account
+            logger.info('Created account %s on registration', account_name)
+            return account
+
+    @staticmethod
+    def _persist_new_account(account: Account) -> None:
+        os.makedirs(ACCOUNTS_PATH, exist_ok=True)
+        if os.path.lexists(account.full_path):
+            # Do not overwrite an unreadable file skipped at startup, or a
+            # differently cased name on a case-insensitive filesystem.
+            raise StorageError('Account file already exists but could not be loaded under this name')
         account.write_file()
-        self._accounts[account_name] = account
-
-    def remove_account(self, account_name: str) -> None:
-        account = self.get_account(account_name)
-        if not account:
-            raise StorageError(f"Account {account_name} does not exist so it cannot be removed")
-        account.remove_file()
-        self._accounts.pop(account_name)
-
-        # если у аккаунта были клиенты, нужно обработать отключение
-        # clients = self._account_clients.pop(account_name)
-        # for client in clients:
-        #     client.writer.close()
 
     def set_cookies(
         self, account_name: str, payload: List[Dict],
