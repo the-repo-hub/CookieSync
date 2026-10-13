@@ -15,6 +15,8 @@ if (typeof importScripts === 'function') {
 }
 
 let socket = null;
+let registeredSocket = null;
+let initialSyncPending = false;
 let isEnabled = false;
 let currentAccount = '';
 let currentServerUrl = DEFAULT_SERVER_URL;
@@ -172,6 +174,8 @@ class CookieSyncClient {
             this.latestRevision = revision;
         }
         this.latestServerPayload = cookies.map(cookie => ({ ...cookie }));
+        // A peer may fill an initially empty account while we check authentication.
+        initialSyncPending = false;
 
         const applyPayload = async () => {
             if (generation !== this.remoteGeneration) {
@@ -306,10 +310,26 @@ async function isAuthenticated() {
     let answered = 0;
     for (const tab of aliveTabs) {
         try {
-            const reply = await withTimeout(
+            let reply = await withTimeout(
                 browser.tabs.sendMessage(tab.id, { type: 'cookiesyncCheckAuth' }),
                 AUTH_CHECK_TIMEOUT_MS,
             );
+            if (!reply || typeof reply.authenticated !== 'boolean') {
+                // Declarative content scripts aren't retroactively loaded into
+                // pages that were already open when the extension was installed.
+                const injected = await withTimeout(browser.scripting.executeScript({
+                    target: { tabId: tab.id, frameIds: [0] },
+                    files: ['browser-polyfill.min.js', 'authentication.js'],
+                }), AUTH_CHECK_TIMEOUT_MS);
+                if (!injected) {
+                    console.warn(`[CookieSync] Auth check: не удалось подключить проверку к вкладке ${tab.id}`);
+                    continue;
+                }
+                reply = await withTimeout(
+                    browser.tabs.sendMessage(tab.id, { type: 'cookiesyncCheckAuth' }),
+                    AUTH_CHECK_TIMEOUT_MS,
+                );
+            }
             if (reply && typeof reply.authenticated === 'boolean') {
                 answered += 1;
                 if (reply.authenticated) {
@@ -317,7 +337,7 @@ async function isAuthenticated() {
                 }
             }
         } catch (e) {
-            // вкладка ещё не загрузила content script — пробуем следующую
+            console.warn(`[CookieSync] Auth check: вкладка ${tab.id} недоступна`, e);
         }
     }
 
@@ -339,58 +359,81 @@ function withTimeout(promise, milliseconds) {
     });
 }
 
-function scheduleCookieSync() {
+function scheduleCookieSync(initialOnly = false) {
+    if (!isEnabled || !registeredSocket || registeredSocket !== socket) {
+        return;
+    }
     clearTimeout(syncDebounceTimer);
     syncDebounceTimer = setTimeout(() => {
         syncDebounceTimer = null;
-        syncCookiesToServer();
+        syncCookiesToServer(initialOnly);
     }, SYNC_DEBOUNCE_MS);
 }
 
-async function syncCookiesToServer() {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        return;
-    }
-    if (!currentAccount) {
-        return;
-    }
-
-    if (!(await isAuthenticated())) {
-        console.warn('[CookieSync] Cookie sync skipped: вход в РЕСО Офис не подтверждён');
-        return;
-    }
-
-    const queries = currentCookieDomains.map(raw => browser.cookies.getAll({ domain: normalizeDomain(raw) }));
-    const results = await Promise.all(queries);
-
-    const seen = new Set();
-    const cookies = [];
-    for (const list of results) {
-        for (const cookie of list) {
-            const key = cookieKey(cookie);
-            if (seen.has(key)) {
-                continue;
-            }
-            seen.add(key);
-            cookies.push(cookie);
-        }
-    }
-
-    const pair = selectSyncCookiePair(cookies, currentCookieDomains);
-    const payload = pair.map(pickCookieFields);
-
-    if (payload.length !== 2) {
-        const restored = await client.restoreLatestPair();
-        console.warn(
-            restored
-                ? '[CookieSync] Incomplete local cookie pair was restored from server state'
-                : '[CookieSync] Cookie sync skipped: complete cookie pair is not available'
-        );
+async function syncCookiesToServer(initialOnly = false) {
+    const sourceSocket = socket;
+    const account = currentAccount;
+    const generation = client.remoteGeneration;
+    const isCurrent = () => isEnabled && sourceSocket && socket === sourceSocket
+        && registeredSocket === sourceSocket && sourceSocket.readyState === WebSocket.OPEN
+        && currentAccount === account && client.remoteGeneration === generation;
+    const canSend = () => isCurrent() && (!initialOnly || initialSyncPending);
+    if (!account || !canSend()) {
         return;
     }
 
     try {
-        const response = await client.sendCommand('set', currentAccount, payload);
+        const authenticated = await isAuthenticated();
+        if (!canSend()) {
+            return;
+        }
+        if (!authenticated) {
+            console.warn('[CookieSync] Cookie sync skipped: вход в РЕСО Офис не подтверждён');
+            if (initialSyncPending) {
+                setSyncPhase('online', 'Cookies не отправлены: откройте office.reso.ru и подтвердите вход');
+            }
+            return;
+        }
+
+        const queries = currentCookieDomains.map(raw => browser.cookies.getAll({ domain: normalizeDomain(raw) }));
+        const results = await Promise.all(queries);
+        if (!canSend()) {
+            return;
+        }
+
+        const seen = new Set();
+        const cookies = [];
+        for (const list of results) {
+            for (const cookie of list) {
+                const key = cookieKey(cookie);
+                if (seen.has(key)) {
+                    continue;
+                }
+                seen.add(key);
+                cookies.push(cookie);
+            }
+        }
+
+        const pair = selectSyncCookiePair(cookies, currentCookieDomains);
+        const payload = pair.map(pickCookieFields);
+
+        if (payload.length !== 2) {
+            const restored = await client.restoreLatestPair();
+            console.warn(
+                restored
+                    ? '[CookieSync] Incomplete local cookie pair was restored from server state'
+                    : '[CookieSync] Cookie sync skipped: complete cookie pair is not available'
+            );
+            if (isCurrent() && initialSyncPending) {
+                setSyncPhase('online', 'Cookies не отправлены: нужна полная пара ASP.NET_SessionId и ResoOffice60');
+            }
+            return;
+        }
+
+        const response = await client.sendCommand('set', account, payload);
+        if (!isCurrent()) {
+            return;
+        }
         if (response.accepted === false) {
             if (response.applied) {
                 console.log(
@@ -400,10 +443,15 @@ async function syncCookiesToServer() {
                 console.error('[CookieSync] Cookie update blocked, but server pair could not be restored');
             }
         } else {
+            initialSyncPending = false;
             console.log(`[CookieSync] Sent ${payload.length} cookies to server`);
         }
+        setSyncPhase('online', '');
     } catch (e) {
         console.error('[CookieSync] Failed to sync cookies to server:', e);
+        if (isCurrent() && initialSyncPending) {
+            setSyncPhase('online', 'Cookies не отправлены: ошибка чтения или отправки, проверьте журнал расширения');
+        }
     }
 }
 
@@ -440,6 +488,8 @@ function connect() {
     try {
         const connection = new WebSocket(currentServerUrl);
         socket = connection;
+        registeredSocket = null;
+        initialSyncPending = false;
 
         connection.addEventListener('open', async () => {
             if (socket !== connection) {
@@ -455,10 +505,22 @@ function connect() {
                 setSyncPhase('registering', currentAccount);
                 try {
                     client.resetRemoteState();
-                    await client.register(currentAccount);
+                    const response = await client.register(currentAccount);
+                    if (socket !== connection || !isEnabled) {
+                        return;
+                    }
+                    registeredSocket = connection;
+                    initialSyncPending = Array.isArray(response.payload)
+                        && response.payload.length === 0 && client.latestServerPayload.length === 0;
                     console.log('[CookieSync] Registered as:', currentAccount);
-                    setSyncPhase('online', '');
+                    setSyncPhase('online', initialSyncPending ? 'Проверка локальных cookies' : '');
+                    if (initialSyncPending) {
+                        scheduleCookieSync(true);
+                    }
                 } catch (e) {
+                    if (socket !== connection || !isEnabled) {
+                        return;
+                    }
                     console.error('[CookieSync] Registration failed:', e);
                     setSyncPhase('error', 'Регистрация: ' + (e && e.message ? e.message : e));
                 }
@@ -480,6 +542,8 @@ function connect() {
                 return;
             }
             socket = null;
+            registeredSocket = null;
+            initialSyncPending = false;
             client.rejectPendingForSocket(connection, new Error('Connection closed'));
             console.log('[CookieSync] Disconnected', event && event.code, event && event.reason);
             if (isEnabled) {
@@ -525,6 +589,8 @@ function connect() {
 }
 
 function disconnect() {
+    registeredSocket = null;
+    initialSyncPending = false;
     stopKeepalive();
     clearTimeout(reconnectTimeout);
     reconnectTimeout = null;
@@ -720,6 +786,21 @@ browser.cookies.onChanged.addListener((changeInfo) => {
         return;
     }
     scheduleCookieSync();
+});
+
+// Retry the initial upload if the user opens/reloads the office tab after
+// connecting. No cookie change is guaranteed to occur on an existing session.
+browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!initialSyncPending || changeInfo.status !== 'complete' || !tab.url) {
+        return;
+    }
+    try {
+        if (new URL(tab.url).hostname === AUTH_CHECK_DOMAIN) {
+            scheduleCookieSync(true);
+        }
+    } catch (e) {
+        console.debug('[CookieSync] Ignoring tab without a valid URL');
+    }
 });
 
 // Listen for storage changes

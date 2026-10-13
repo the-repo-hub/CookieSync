@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "CookieSync Extension",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Синхронизация куки между браузерами через WebSocket сервер",
   "minimum_chrome_version": "121",
-  "permissions": ["storage", "cookies", "alarms"],
+  "permissions": ["storage", "cookies", "alarms", "scripting"],
   "host_permissions": ["*://*/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' ws: wss: http: https:;"
