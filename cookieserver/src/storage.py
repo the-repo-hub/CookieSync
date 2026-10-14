@@ -99,7 +99,14 @@ class Account:
         remaining = self._locked_until - time.monotonic()
         return max(0, math.ceil(remaining))
 
-    def set_payload(self, payload) -> CookieUpdateResult:
+    def set_payload(self, payload, expected_revision: Optional[int] = None) -> CookieUpdateResult:
+        if expected_revision is not None:
+            if type(expected_revision) is not int or expected_revision < 0:
+                raise StorageError('expected_revision must be a non-negative integer')
+            if expected_revision != self.revision:
+                return CookieUpdateResult(
+                    accepted=False, changed=False, retry_after=self.retry_after(),
+                )
         if payload == self.payload:
             return CookieUpdateResult(
                 accepted=True,
@@ -107,7 +114,7 @@ class Account:
                 retry_after=self.retry_after(),
             )
         retry_after = self.retry_after()
-        if retry_after:
+        if retry_after and expected_revision is None:
             return CookieUpdateResult(
                 accepted=False,
                 changed=False,
@@ -173,6 +180,10 @@ class AccountStorage:
         ws_set = self.websockets_by_account.get(account_name)
         if ws_set:
             ws_set.discard(websocket)
+
+    def require_registered_client(self, websocket: ServerConnection, account_name: str) -> None:
+        if self._ws_accounts.get(websocket) != account_name:
+            raise StorageError('Register in this account before refreshing cookies')
 
     def _load_accounts(self) -> None:
         if not os.path.isdir(ACCOUNTS_PATH):
@@ -296,6 +307,7 @@ class AccountStorage:
 
     def set_cookies(
         self, account_name: str, payload: List[Dict],
+        *, expected_revision: Optional[int] = None,
     ) -> CookieUpdateResult:
         account = self.require_account(account_name)
-        return account.set_payload(require_complete_cookie_pair(payload))
+        return account.set_payload(require_complete_cookie_pair(payload), expected_revision)

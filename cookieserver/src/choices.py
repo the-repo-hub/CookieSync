@@ -1,6 +1,7 @@
 class Commands:
     set = 'set'
     register = 'register'
+    refresh = 'refresh'
 
 
 class Fields:
@@ -13,3 +14,4 @@ class Fields:
     accepted = 'accepted'
     revision = 'revision'
     retry_after = 'retry_after'
+    expected_revision = 'expected_revision'

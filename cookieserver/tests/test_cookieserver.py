@@ -1071,3 +1071,176 @@ class TestManagementCommands:
         server = RunServerCommand().build_server(args)
         assert server.certfile == '/tmp/c.pem'
         assert server.keyfile == '/tmp/k.pem'
+
+
+class TestRefreshCookies:
+    @staticmethod
+    def request(account, cookies, revision):
+        return {
+            Fields.command: Commands.refresh, Fields.account: account,
+            Fields.payload: cookies, Fields.expected_revision: revision,
+        }
+
+    @pytest.mark.asyncio
+    async def test_refresh_replaces_pair_during_cooldown_and_persists(
+        self, server, account, async_client, second_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        first = await async_client.send_request(set_payload(account, cookies_not_sample))
+        await second_client.send_request(register_payload(account))
+        assert server.storage.require_account(account).retry_after() > 0
+        response = await async_client.send_request(self.request(account, cookies_other, first[Fields.revision]))
+        assert response[Fields.result] is True
+        assert response[Fields.accepted] is True
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert response[Fields.revision] == 2
+        assert response[Fields.payload] == cookies_other
+        assert response[Fields.retry_after] == COOKIE_UPDATE_INTERVAL
+        persisted = AccountStorage().require_account(account)
+        assert persisted.payload == cookies_other
+        assert persisted.revision == 2
+        assert persisted.retry_after() > 0
+        push = await second_client.recv_server_message()
+        assert push[Fields.payload] == cookies_other
+        assert push[Fields.command] == Commands.set
+        assert Fields.uuid not in push
+        assert async_client.server_messages.empty()
+
+        before = server.storage.require_account(account).updated_at
+        duplicate = await async_client.send_request(self.request(account, cookies_other, 1))
+        assert duplicate[Fields.accepted] is False
+        assert duplicate[Fields.revision] == 2
+        assert server.storage.require_account(account).updated_at == before
+        assert second_client.server_messages.empty()
+
+    @pytest.mark.asyncio
+    async def test_refresh_conflict_is_rejected_even_after_cooldown(
+        self, server, account, async_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(set_payload(account, cookies_not_sample))
+        await async_client.send_request(self.request(account, cookies_other, 1))
+        account_obj = server.storage.require_account(account)
+        account_obj._locked_until = 0
+        response = await async_client.send_request(self.request(account, cookies_not_sample, 1))
+        assert response[Fields.result] is True
+        assert response[Fields.accepted] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert response[Fields.payload] == cookies_other
+        assert response[Fields.revision] == 2
+        assert response[Fields.retry_after] == 0
+        assert 'revision changed' in response[Fields.message]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_refreshes_have_exactly_one_winner(
+        self, server, account, async_client, second_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(set_payload(account, cookies_not_sample))
+        await second_client.send_request(register_payload(account))
+        alternate = [dict(cookie, value=cookie['value'] + '-another') for cookie in cookies_other]
+        first, second = await asyncio.gather(
+            async_client.send_request(self.request(account, cookies_other, 1)),
+            second_client.send_request(self.request(account, alternate, 1)),
+        )
+        assert sorted([first[Fields.accepted], second[Fields.accepted]]) == [False, True]
+        assert first[Fields.uuid] == async_client.last_request_uuid
+        assert second[Fields.uuid] == second_client.last_request_uuid
+        winner = cookies_other if first[Fields.accepted] else alternate
+        assert first[Fields.payload] == second[Fields.payload] == winner
+        assert first[Fields.revision] == second[Fields.revision] == 2
+        assert AccountStorage().require_account(account).payload == winner
+        loser = second_client if first[Fields.accepted] else async_client
+        push = await loser.recv_server_message()
+        assert push[Fields.payload] == winner
+        assert Fields.uuid not in push
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('revision', [None, True, False, -1, 1.5, '1', [], {}])
+    async def test_invalid_expected_revision_is_rejected(
+        self, server, account, async_client, cookies_not_sample, revision,
+    ):
+        await async_client.send_request(register_payload(account))
+        request = self.request(account, cookies_not_sample, revision)
+        if revision is None:
+            request.pop(Fields.expected_revision)
+        response = await async_client.send_request(request)
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert 'expected_revision' in response[Fields.message]
+        assert server.storage.require_account(account).revision == 0
+
+    @pytest.mark.asyncio
+    async def test_refresh_requires_registration_in_target_account(
+        self, server, account, other_account, async_client, second_client, cookies_not_sample,
+    ):
+        await async_client.send_request(register_payload(account))
+        response = await second_client.send_request(self.request(account, cookies_not_sample, 0))
+        assert response[Fields.result] is False
+        await second_client.send_request(register_payload(other_account))
+        response = await second_client.send_request(self.request(account, cookies_not_sample, 0))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == second_client.last_request_uuid
+        assert 'Register' in response[Fields.message]
+        assert server.storage.require_account(account).payload == []
+
+    @pytest.mark.asyncio
+    async def test_regular_set_cannot_bypass_cooldown_by_adding_revision(
+        self, server, account, async_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(set_payload(account, cookies_not_sample))
+        request = set_payload(account, cookies_other)
+        request[Fields.expected_revision] = 1
+        response = await async_client.send_request(request)
+        assert response[Fields.accepted] is False
+        assert response[Fields.payload] == cookies_not_sample
+        assert response[Fields.revision] == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_refresh_write_rolls_back_and_can_be_retried(
+        self, server, account, async_client, second_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(set_payload(account, cookies_not_sample))
+        await second_client.send_request(register_payload(account))
+        account_obj: Account = server.storage.require_account(account)
+        before = (account_obj.updated_at, account_obj.revision, account_obj._locked_until)
+        with patch.object(account_obj, 'write_file', side_effect=OSError('disk full')):
+            response = await async_client.send_request(self.request(account, cookies_other, 1))
+        assert response[Fields.result] is False
+        assert response[Fields.message] == 'Internal server error'
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert (account_obj.updated_at, account_obj.revision, account_obj._locked_until) == before
+        assert account_obj.payload == cookies_not_sample
+        assert second_client.server_messages.empty()
+        response = await async_client.send_request(self.request(account, cookies_other, 1))
+        assert response[Fields.accepted] is True
+        assert response[Fields.revision] == 2
+
+    @pytest.mark.asyncio
+    async def test_refresh_waits_for_account_lock(
+        self, server, account, async_client, cookies_not_sample, cookies_other,
+    ):
+        await async_client.send_request(register_payload(account))
+        await async_client.send_request(set_payload(account, cookies_not_sample))
+        waiting = asyncio.Event()
+
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():
+                    waiting.set()
+                return await super().acquire()
+
+        account_obj = server.storage.require_account(account)
+        account_obj.lock = ObservedLock()
+        await account_obj.lock.acquire()
+        try:
+            request = asyncio.create_task(async_client.send_request(self.request(account, cookies_other, 1)))
+            await asyncio.wait_for(waiting.wait(), timeout=1)
+            assert not request.done()
+            assert account_obj.payload == cookies_not_sample
+        finally:
+            account_obj.lock.release()
+        response = await asyncio.wait_for(request, timeout=1)
+        assert response[Fields.accepted] is True

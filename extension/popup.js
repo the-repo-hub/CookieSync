@@ -7,6 +7,9 @@ const accountError = document.getElementById('accountError');
 const serverError = document.getElementById('serverError');
 const domainError = document.getElementById('domainError');
 const syncStatus = document.getElementById('syncStatus');
+let boundContext = null;
+let boundTabId = null;
+let saveQueue = Promise.resolve();
 
 const SETTINGS_FIELDS = [accountInput, serverUrlInput, cookieDomainInput];
 
@@ -17,7 +20,7 @@ function setFieldsDisabled(disabled) {
 }
 
 function validateInputs() {
-    let isValid = true;
+    let isValid = boundContext !== null;
     accountError.textContent = '';
     serverError.textContent = '';
     domainError.textContent = '';
@@ -36,6 +39,13 @@ function validateInputs() {
         isValid = false;
     } else {
         serverUrlInput.classList.remove('error');
+        try {
+            validateSyncSettings({ serverUrl: serverUrlInput.value });
+        } catch (error) {
+            serverUrlInput.classList.add('error');
+            serverError.textContent = error.message;
+            isValid = false;
+        }
     }
 
     if (!cookieDomainInput.value.trim()) {
@@ -114,24 +124,33 @@ function updateStatusDisplay(connected, enabled, phase, detail, error) {
 }
 
 async function loadSettings() {
-    const settings = await browser.storage.local.get(['account', 'serverUrl', 'enabled', 'cookieDomains', 'cookieDomain']);
-    accountInput.value = settings.account || '';
-    serverUrlInput.value = settings.serverUrl || 'ws://mnas:52314';
-    const rawDomains = settings.cookieDomains !== undefined ? settings.cookieDomains : settings.cookieDomain;
-    cookieDomainInput.value = Array.isArray(rawDomains) ? rawDomains.join(', ') : (rawDomains || '.reso.ru');
-    enableToggle.checked = settings.enabled === true;
-    updateToggleState();
-    setFieldsDisabled(enableToggle.checked);
-
+    enableToggle.disabled = true;
+    setFieldsDisabled(true);
     try {
-        const status = await browser.runtime.sendMessage({ type: 'getStatus' });
-        updateStatusDisplay(status.connected, status.enabled, status.phase, status.detail, status.error);
-    } catch (e) {
-        updateStatusDisplay(false, false, 'error', 'Нет ответа от фонового скрипта');
+        const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+        if (!Number.isInteger(tab?.id)) throw new Error('Нет активной вкладки для выбора контекста');
+        boundTabId = tab.id;
+        const status = await browser.runtime.sendMessage({ type: 'getContext', tabId: boundTabId });
+        boundContext = { storeId: status.storeId, contextId: status.contextId };
+        const settings = status.settings;
+        accountInput.value = settings.account;
+        serverUrlInput.value = settings.serverUrl;
+        cookieDomainInput.value = settings.cookieDomains.join(', ');
+        enableToggle.checked = settings.enabled;
+        updateToggleState();
+        setFieldsDisabled(enableToggle.checked);
+        updateStatusDisplay(status.connected, settings.enabled, status.phase, status.detail, status.error);
+    } catch (error) {
+        showError(error);
     }
 }
 
-async function saveSettings() {
+function showError(error) {
+    syncStatus.className = 'sync-status error';
+    syncStatus.textContent = `Ошибка: ${error.message || error}`;
+}
+
+function saveSettings() {
     if (!validateInputs()) {
         return;
     }
@@ -148,17 +167,20 @@ async function saveSettings() {
         enabled: enableToggle.checked
     };
 
-    await browser.storage.local.set(settings);
-
-    browser.runtime.sendMessage({
-        type: 'settingsChanged',
-        settings: settings
-    }).catch(() => {});
+    const request = {
+        type: 'saveSettings', tabId: boundTabId, contextId: boundContext.contextId, settings,
+    };
+    saveQueue = saveQueue.then(async () => {
+        const status = await browser.runtime.sendMessage(request);
+        updateStatusDisplay(status.connected, status.settings.enabled, status.phase, status.detail, status.error);
+    }).catch(showError);
+    return saveQueue;
 }
 
 // Event listeners
 accountInput.addEventListener('input', updateToggleState);
 serverUrlInput.addEventListener('input', updateToggleState);
+cookieDomainInput.addEventListener('input', updateToggleState);
 
 accountInput.addEventListener('blur', saveSettings);
 serverUrlInput.addEventListener('blur', saveSettings);
@@ -183,10 +205,12 @@ toggleContainer.addEventListener('click', function (e) {
 
 // Listen for status updates from background
 browser.runtime.onMessage.addListener((message) => {
-    if (message.type === 'statusUpdate') {
-        browser.runtime.sendMessage({ type: 'getStatus' }).then((status) => {
-            updateStatusDisplay(status.connected, status.enabled, status.phase, status.detail, status.error);
-        }).catch(() => {});
+    if (message.type === 'statusUpdate' && boundContext && message.contextId === boundContext.contextId) {
+        browser.runtime.sendMessage({
+            type: 'getContext', tabId: boundTabId, contextId: boundContext.contextId,
+        }).then(status => {
+            updateStatusDisplay(status.connected, status.settings.enabled, status.phase, status.detail, status.error);
+        }).catch(showError);
     }
 });
 

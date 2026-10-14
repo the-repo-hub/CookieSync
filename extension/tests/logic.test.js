@@ -308,3 +308,21 @@ test('remote change: повторный remark освежает TTL, но мар
     // удалён после первого потребления
     assert.equal(isExpectedRemoteChange(expected, { domain: 'reso.ru', name: 's' }, 5000, 3501), false);
 });
+
+test('remote change: markers in regular and private stores are independent', () => {
+    const expected = new Map();
+    const regular = { domain: '.reso.ru', path: '/', name: 's', value: 'same', storeId: '0' };
+    const privateCookie = { ...regular, storeId: '1' };
+    remarkExpectedRemoteChange(expected, regular, 1000);
+    assert.equal(isExpectedRemoteChange(expected, privateCookie, 5000, 1001), false);
+    remarkExpectedRemoteChange(expected, privateCookie, 1000);
+    assert.equal(isExpectedRemoteChange(expected, regular, 5000, 1001), true);
+    assert.equal(isExpectedRemoteChange(expected, privateCookie, 5000, 1001), true);
+});
+
+test('cookie store IDs are selected locally and never serialized in the protocol', () => {
+    const cookie = { domain: '.reso.ru', path: '/', name: 's', value: 'value', storeId: 'remote-id' };
+    assert.equal('storeId' in pickCookieFields(cookie), false);
+    assert.equal('storeId' in buildCookieSetDetails(cookie, 'reso.ru'), false);
+    assert.equal(buildCookieSetDetails(cookie, 'reso.ru', 'local-private').storeId, 'local-private');
+});

@@ -145,6 +145,21 @@ storage.set_cookies(
 
 ## Account locking
 
+`refresh` is a separate registered command for reauthentication. It requires
+registration in the target account and an integer `expected_revision >= 0`.
+Compare the revision and replace cookies under the same `account.lock`.
+Only a matching revision bypasses `cookie_update_interval`; ordinary `set`
+never bypasses it. A conflict returns `accepted: false` with current cookies
+and revision. Push messages remain `command: set`, without a UUID.
+
+The client observes a visible-to-hidden/absent login dialog transition in
+`authentication.js`, routed by the sender's top-level office tab to its context.
+Pin the revision when the login dialog is observed, never rebase a stale attempt
+automatically. Do not restore that old pair during reauthentication. Newer
+server revisions win. Keep recovery metadata only in `storage.session` and
+clear it on account change, tab/context disposal; preserve the fence across
+worker recreation and reconnect while the same login context is alive.
+
 Each account has:
 
 ```python
@@ -572,7 +587,19 @@ let isRegistered = false;
 
 Do not create one WebSocket per command.
 
-Use one long-lived WebSocket connection per active browser client.
+Use one long-lived WebSocket connection per enabled cookie-store context.
+Regular browsing, private browsing and Firefox containers are independent clients.
+`background.js` manages contexts; `sync-context.js` owns each context's socket,
+UUID map, cookie queue, revision, timers, authentication and loop suppression.
+
+Never broadcast one context's cookies into other local cookie stores.
+Popup selects its context from the active tab and sends settings through runtime
+messages with a context identity; it must not read/write shared account settings.
+Persist regular/container settings under `storage.local.contextSettings`.
+Private settings belong only in RAM (`storage.session`), tied to live private tabs.
+Closing the last private tab disposes that context and clears its session settings;
+a new private lifetime must not inherit the old account or the regular account.
+Migrate legacy flat settings only into the regular/default cookie store.
 
 Expected lifecycle:
 
@@ -786,7 +813,8 @@ gate: the client does not send `set` unless the user is confirmed signed in.
 
 Implementation requirements:
 
-* the check lives in background code (`isAuthenticated()` in `background.js`);
+* the check lives in background code (`CookieSyncContext.isAuthenticated()` in `sync-context.js`)
+  and only queries tabs belonging to that context's cookie store;
 * the actual verdict comes from the content script `authentication.js` injected
   into `office.reso.ru` pages, which reports the visibility of the РЕСО Офис
   login dialog (`#clbkAuth_ASPxPopupControl1_loginTitle2`);

@@ -6,6 +6,7 @@ from typing import Dict, Type
 
 from cookieserver.src.choices import Commands, Fields
 from cookieserver.src.request import Request
+from cookieserver.src.errors import HandleCommandError
 from cookieserver.src.settings import BROADCAST_TIMEOUT
 from cookieserver.src.storage import AccountStorage
 from websockets.asyncio.server import ServerConnection
@@ -45,10 +46,19 @@ class RegisterCookiesCommand(Command):
 class SetCookiesCommand(Command):
 
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        return await self._execute_update(storage, request, websocket)
 
+    async def _execute_update(
+        self, storage: AccountStorage, request: Request, websocket: ServerConnection,
+        expected_revision: int | None = None,
+    ) -> Dict:
         account = storage.require_account(request.account)
         async with account.lock:
-            update = storage.set_cookies(request.account, request.payload)
+            if expected_revision is not None:
+                storage.require_registered_client(websocket, request.account)
+            update = storage.set_cookies(
+                request.account, request.payload, expected_revision=expected_revision,
+            )
             output = {
                 Fields.command: Commands.set,
                 Fields.payload: account.payload,
@@ -65,6 +75,8 @@ class SetCookiesCommand(Command):
                 Fields.message: (
                     'Cookies were set successfully'
                     if update.accepted
+                    else 'Account revision changed; stored cookies restored'
+                    if expected_revision is not None
                     else f'Cookie update blocked for {update.retry_after}s; stored cookies restored'
                 ),
                 Fields.payload: account.payload,
@@ -90,3 +102,13 @@ class SetCookiesCommand(Command):
                 logger.exception(
                     f'Failed to close stale client {websocket.remote_address}'
                 )
+
+
+@register_command(Commands.refresh)
+class RefreshCookiesCommand(SetCookiesCommand):
+    """Compare-and-swap replacement after a client observes a fresh login."""
+
+    async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        if type(request.expected_revision) is not int or request.expected_revision < 0:
+            raise HandleCommandError('refresh requires a non-negative integer expected_revision')
+        return await self._execute_update(storage, request, websocket, request.expected_revision)

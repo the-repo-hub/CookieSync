@@ -13,6 +13,7 @@ class Request:
         self.command = self.payload.get(Fields.command)
         self.account = self.payload.get(Fields.account)
         self.uuid = self.payload.get(Fields.uuid)
+        self.expected_revision = self.payload.get(Fields.expected_revision)
         self.payload = self.payload.get(Fields.payload)
 
         if not self.command:

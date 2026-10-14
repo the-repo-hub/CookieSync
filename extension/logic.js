@@ -4,6 +4,34 @@
 
 const SYNC_COOKIE_NAMES = ['ASP.NET_SessionId', 'ResoOffice60'];
 
+function normalizeSyncSettings(settings = {}) {
+    const domains = parseDomains(settings.cookieDomains ?? settings.cookieDomain);
+    return {
+        account: typeof settings.account === 'string' ? settings.account.trim() : '',
+        serverUrl: typeof settings.serverUrl === 'string' && settings.serverUrl.trim()
+            ? settings.serverUrl.trim() : 'ws://mnas:52314',
+        cookieDomains: domains.length ? domains : ['.reso.ru'],
+        enabled: settings.enabled === true,
+    };
+}
+
+function validateSyncSettings(settings) {
+    const result = normalizeSyncSettings(settings);
+    let url;
+    try {
+        url = new URL(result.serverUrl);
+    } catch (error) {
+        throw new Error('Некорректный адрес сервера');
+    }
+    if (!['ws:', 'wss:'].includes(url.protocol) || url.hash) {
+        throw new Error('Укажите адрес ws:// или wss:// без фрагмента #');
+    }
+    if (result.enabled && !result.account) {
+        throw new Error('Укажите аккаунт для этого контекста');
+    }
+    return result;
+}
+
 function normalizeDomain(domain) {
     return String(domain || '').replace(/^\./, '').toLowerCase();
 }
@@ -20,6 +48,10 @@ function parseDomains(value) {
 
 function cookieKey(cookie) {
     return `${normalizeDomain(cookie.domain)}|${cookie.path || '/'}|${cookie.name}`;
+}
+
+function cookieStoreKey(cookie) {
+    return `${cookie.storeId || ''}|${cookieKey(cookie)}`;
 }
 
 // Домен куки принадлежит одному из целевых доменов:
@@ -130,7 +162,7 @@ function buildCookieUrl(cookie, fallbackDomain) {
 }
 
 // Детали вызова browser.cookies.set (без зависимости от браузерного API).
-function buildCookieSetDetails(cookie, fallbackDomain) {
+function buildCookieSetDetails(cookie, fallbackDomain, storeId) {
     const details = {
         url: buildCookieUrl(cookie, fallbackDomain),
         name: cookie.name,
@@ -155,6 +187,10 @@ function buildCookieSetDetails(cookie, fallbackDomain) {
     if (cookie.expirationDate !== undefined) {
         details.expirationDate = cookie.expirationDate;
     }
+    // Store IDs are local browser state, never taken from the server payload.
+    if (storeId !== undefined) {
+        details.storeId = storeId;
+    }
     return details;
 }
 
@@ -162,7 +198,7 @@ function buildCookieSetDetails(cookie, fallbackDomain) {
 // выставлять локально; onChanged для них не должен вызывать повторный set.
 // Ключ нормализуется через cookieKey, поэтому .reso.ru и reso.ru совпадают.
 function remarkExpectedRemoteChange(expected, cookie, now = Date.now()) {
-    expected.set(cookieKey(cookie), {
+    expected.set(cookieStoreKey(cookie), {
         at: now,
         value: String(cookie.value !== undefined ? cookie.value : ''),
     });
@@ -176,7 +212,7 @@ function isExpectedRemoteChange(
     removed = false,
     cause = '',
 ) {
-    const key = cookieKey(cookie);
+    const key = cookieStoreKey(cookie);
     const marker = expected.get(key);
     if (!marker) {
         return false;
@@ -201,9 +237,12 @@ function isExpectedRemoteChange(
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+        normalizeSyncSettings,
+        validateSyncSettings,
         normalizeDomain,
         parseDomains,
         cookieKey,
+        cookieStoreKey,
         isCookieForSyncDomain,
         isCookieForSync,
         selectSyncCookiePair,

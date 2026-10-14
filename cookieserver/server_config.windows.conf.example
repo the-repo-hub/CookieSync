@@ -20,6 +20,7 @@ broadcast_timeout = 5
 ; Certificate files must be provisioned separately; startup does not create them.
 
 ; Minimum interval between different cookie pairs for an account, in seconds.
+; Reauthentication refresh with a matching expected_revision can bypass it.
 cookie_update_interval = 300
 
 ; Maximum incoming message size, in bytes.
