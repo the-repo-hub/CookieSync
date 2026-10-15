@@ -227,15 +227,25 @@ browser.runtime.onMessage.addListener((request, sender) => {
             if (!['http:', 'https:'].includes(url.protocol) || url.hostname !== 'office.reso.ru') return;
         } catch (error) { return; }
         const context = contexts.get(tabStores.get(sender.tab.id));
-        const generation = context?.generation;
+        // DOM observations belong to settings/tab lifetime, not a WebSocket.
+        // On worker wake, capture ownership after session restoration and before
+        // later queued settings operations can reconfigure that context.
+        const owner = context ? Promise.resolve({ context, generation: context.settingsGeneration, revision: context.latestRevision })
+            : ready.then(() => {
+                const restored = contexts.get(tabStores.get(sender.tab.id));
+                return { context: restored, generation: restored?.settingsGeneration, revision: restored?.latestRevision };
+            });
         return enqueue(async () => {
+            const { context, generation, revision } = await owner;
             await reconcile();
-            if (context && contexts.get(tabStores.get(sender.tab.id)) === context && context.generation === generation) {
+            const current = () => context && contexts.get(tabStores.get(sender.tab.id)) === context
+                && context.settingsGeneration === generation;
+            if (current()) {
                 const tab = await browser.tabs.get(sender.tab.id);
                 try {
                     if (new URL(tab.url).hostname !== 'office.reso.ru') return;
                 } catch (error) { return; }
-                await context.authStateChanged(sender.tab.id, request);
+                if (current()) await context.authStateChanged(sender.tab.id, request, revision);
             }
         });
     }

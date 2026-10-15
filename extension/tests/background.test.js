@@ -786,6 +786,150 @@ test('changing account after disconnect discards the previous account revision',
     assert.deepEqual(app.written.map(cookie => cookie.value), pairB.map(cookie => cookie.value));
 });
 
+for (const revision of [5, 6]) {
+    test(`worker restored before login retains known revision ${revision}`, async () => {
+        const app = await background();
+        const socket = await app.register(pair, true, '0', 5);
+        await app.authState(7, false);
+        if (revision === 6) {
+            await socket.message({ command: 'set', payload: pair, revision });
+            await app.settle();
+        }
+        assert.equal(app.state.session.reauthContexts['0'].latestRevision, revision);
+        assert.equal(JSON.stringify(app.state.local).includes('latestRevision'), false);
+        const resumed = await background({
+            local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+            authStateByTab: structuredClone(app.state.authStateByTab), cookies: pairB,
+        });
+        assert.equal(resumed.context().latestRevision, revision);
+        await resumed.authState(7, true);
+        await resumed.authState(7, false);
+        await resumed.register(pair, true, '0', revision);
+        assert.equal(resumed.written.length, 0);
+        await resumed.fireTimer(1500);
+        assert.equal(resumed.sent.at(-1).command, 'refresh');
+        assert.equal(resumed.sent.at(-1).expected_revision, revision);
+        assert.deepEqual(resumed.sent.at(-1).payload, pairB);
+    });
+}
+
+test('worker-waking login message is routed after restoring its context and revision', async () => {
+    const app = await background();
+    await app.register(pair, true, '0', 5);
+    await app.authState(7, false);
+    const resumed = await background({
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session), cookies: pairB,
+        beforeReady: async ({ browser, state, lookup }) => {
+            assert.equal(lookup('0'), undefined);
+            const message = { type: 'cookiesyncAuthState', documentId: 'doc-7', sequence: 2,
+                ready: true, loginVisible: true, authenticated: false };
+            state.authStateByTab = { 7: message };
+            await browser.runtime.onMessage.emit(message, {
+                id: 'extension-test', url: normalTab.url, tab: normalTab, frameId: 0,
+            });
+        },
+    });
+    assert.equal(resumed.context().recovery.expectedRevision, 5);
+    await resumed.authState(7, false);
+    await resumed.register(pair, true, '0', 5);
+    assert.equal(resumed.written.length, 0);
+    await resumed.fireTimer(1500);
+    assert.equal(resumed.sent.at(-1).command, 'refresh');
+});
+
+test('persisted revision is rejected for changed settings or a different tab lifetime', async () => {
+    const app = await background();
+    await app.register(pair, true, '0', 5);
+    await app.authState(7, false);
+    for (const changes of [
+        { account: 'another' }, { serverUrl: 'ws://other:52314' }, { cookieDomains: ['example.com'] },
+    ]) {
+        const local = structuredClone(app.state.local);
+        Object.assign(local.contextSettings['0'], changes);
+        const resumed = await background({ local, session: structuredClone(app.state.session) });
+        assert.equal(resumed.context().latestRevision, -1);
+        assert.equal(resumed.context().authStates.size, 0);
+    }
+    const resumed = await background({ local: structuredClone(app.state.local),
+        session: structuredClone(app.state.session), tabs: [{ ...normalTab, id: 17 }] });
+    assert.equal(resumed.context().latestRevision, -1);
+    assert.equal(resumed.context().authStates.size, 0);
+});
+
+/** Приостанавливает один снимок stores, чтобы детерминированно проверить очередь событий. */
+function holdStoreQuery(app) {
+    let release, signal;
+    const gate = new Promise(resolve => { release = resolve; });
+    const entered = new Promise(resolve => { signal = resolve; });
+    const original = app.browser.cookies.getAllCookieStores;
+    let once = true;
+    app.browser.cookies.getAllCookieStores = async () => {
+        if (once) { once = false; signal(); await gate; }
+        return original();
+    };
+    return { entered, release };
+}
+
+test('queued login observation survives reconnect without changing its revision fence', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, false);
+    await socket.close(); await app.settle();
+    const hold = holdStoreQuery(app);
+    const observing = app.authState(7, true);
+    await hold.entered;
+    const reconnecting = app.fireTimer(5000);
+    hold.release();
+    await Promise.all([observing, reconnecting]);
+    assert.equal(app.context().recovery.expectedRevision, 5);
+    app.state.cookies = pairB;
+    await app.authState(7, false);
+    app.written.length = 0;
+    await app.register(pair, true, '0', 5);
+    assert.equal(app.written.length, 0);
+    await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'refresh');
+    assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
+test('a queued login observation cannot rebase onto a newer server push', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, false);
+    const hold = holdStoreQuery(app);
+    const observing = app.authState(7, true);
+    await hold.entered;
+    await socket.message({ command: 'set', payload: pairB, revision: 6 });
+    await app.context().applyQueue;
+    hold.release();
+    await observing;
+    await app.authState(7, false);
+    assert.equal(app.context().authStates.get(7).observedRevision, 5);
+    assert.equal(app.context().latestRevision, 6);
+    assert.equal(app.context().recovery, null);
+    assert.ok(app.sent.every(request => request.command === 'register'));
+    assert.equal(app.timers.size, 0);
+});
+
+for (const action of ['account', 'disable', 'dispose']) {
+    test(`queued login observation is rejected after ${action}`, async () => {
+        const app = await background();
+        await app.register(pair, true, '0', 5);
+        const context = app.context();
+        const hold = holdStoreQuery(app);
+        const observing = app.authState(7, true);
+        await hold.entered;
+        if (action === 'account') context.configure(config('new_account'));
+        if (action === 'disable') context.configure({ ...context.settings, enabled: false });
+        if (action === 'dispose') context.dispose();
+        hold.release();
+        await observing;
+        assert.equal(context.authStates.size, 0);
+        assert.equal(context.recovery, null);
+        assert.equal(context.latestRevision, -1);
+    });
+}
+
 test('an unsupported server reports an error without restoring the failed old session', async () => {
     const app = await background();
     const socket = await app.register(pair);
@@ -800,6 +944,139 @@ test('an unsupported server reports an error without restoring the failed old se
     assert.match(app.context().error, /версию сервера/);
     assert.equal(app.context().recovery.ready, true);
 });
+
+test('private revision survives only the same live private lifetime', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    await app.save(config('private_account'), 9);
+    await app.register(pair, true, '1', 11);
+    await app.authState(9, false);
+    assert.equal(app.state.session.reauthContexts['1'].latestRevision, 11);
+    assert.equal(JSON.stringify(app.state.local).includes('latestRevision'), false);
+    const resumed = await background({ tabs: [normalTab, privateTab],
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+        authStateByTab: structuredClone(app.state.authStateByTab) });
+    assert.equal(resumed.context('1').latestRevision, 11);
+    assert.equal(resumed.context('0').latestRevision, -1);
+    await resumed.authState(9, true);
+    await resumed.authState(9, false);
+    await resumed.register(pair, true, '1', 11);
+    assert.equal(resumed.written.length, 0);
+    resumed.state.tabs = [normalTab];
+    await resumed.browser.tabs.onRemoved.emit(9); await resumed.settle();
+    assert.equal('1' in resumed.state.session.reauthContexts, false);
+    const reopened = await background({ tabs: [normalTab, { ...privateTab, id: 19 }],
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session) });
+    assert.equal(reopened.context('1').latestRevision, -1);
+    assert.equal(reopened.context('1').settings.enabled, false);
+});
+
+test('late idempotent refresh clears its fence and error without incrementing the revision', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true);
+    await app.authState(7, false);
+    await app.fireTimer(1500);
+    const request = app.sent.at(-1);
+    await app.fireTimer(10000);
+    assert.equal(app.context().phase, 'error');
+    assert.equal(app.context().pending.size, 0);
+    assert.equal(app.context().lateRefreshes.size, 1);
+    await socket.message({ uuid: request.uuid, result: true, accepted: true, payload: pair, revision: 5 });
+    await app.settle();
+    assert.equal(app.context().recovery, null);
+    assert.equal(app.context().latestRevision, 5);
+    assert.equal(app.context().phase, 'online');
+    assert.equal(app.context().error, '');
+    assert.equal(app.context().lateRefreshes.size, 0);
+    assert.equal(app.timers.size, 0);
+    assert.equal('expectedRevision' in app.state.session.reauthContexts['0'], false);
+});
+
+test('an unrelated UUID or a failed late response cannot resolve a timed-out login', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true); await app.authState(7, false); await app.fireTimer(1500);
+    const request = app.sent.at(-1);
+    const recovery = app.context().recovery;
+    await app.fireTimer(10000);
+    await socket.message({ uuid: 'another-request', result: true, accepted: true, payload: pair, revision: 5 });
+    await app.settle();
+    assert.equal(app.context().recovery, recovery);
+    await socket.message({ uuid: request.uuid, result: false, message: 'failed', payload: pair, revision: 5 });
+    await app.settle();
+    assert.equal(app.context().recovery, recovery);
+    assert.equal(app.context().phase, 'error');
+    assert.equal(app.written.length, 2);
+});
+
+test('late refresh acknowledgement cannot release a newer login attempt at the same revision', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true); await app.authState(7, false); await app.fireTimer(1500);
+    const oldRequest = app.sent.at(-1);
+    await app.fireTimer(10000);
+    await app.authState(7, true); await app.authState(7, false);
+    const newerRecovery = app.context().recovery;
+    await socket.message({ uuid: oldRequest.uuid, result: true, accepted: true, payload: pair, revision: 5 });
+    await app.settle();
+    assert.equal(app.context().recovery, newerRecovery);
+    assert.equal(app.written.length, 2);
+    await app.fireTimer(1500);
+    const newRequest = app.sent.at(-1);
+    assert.notEqual(oldRequest.uuid, newRequest.uuid);
+    assert.equal(newRequest.expected_revision, 5);
+    await socket.message({ uuid: newRequest.uuid, result: true, accepted: true, payload: pair, revision: 5 });
+    await app.settle();
+    assert.equal(app.context().recovery, null);
+    assert.equal(app.context().phase, 'online');
+});
+
+for (const empty of [false, true]) {
+    test(`late revision conflict adopts the authoritative result (empty=${empty})`, async () => {
+        const app = await background({ cookies: pairB });
+        const socket = await app.register(pair, true, '0', 5);
+        await app.authState(7, true); await app.authState(7, false); await app.fireTimer(1500);
+        const request = app.sent.at(-1);
+        await app.fireTimer(10000);
+        await socket.message({ uuid: request.uuid, result: true, accepted: false,
+            payload: empty ? [] : pairB, revision: 6 });
+        await app.settle();
+        assert.equal(app.context().recovery, null);
+        assert.equal(app.context().latestRevision, 6);
+        assert.equal(app.context().phase, 'online');
+        if (empty) {
+            await app.fireTimer(1500);
+            assert.equal(app.sent.at(-1).command, 'set');
+            assert.equal('expected_revision' in app.sent.at(-1), false);
+        } else {
+            assert.deepEqual(app.written.slice(-2).map(cookie => cookie.value), pairB.map(cookie => cookie.value));
+            assert.match(app.context().detail, /Другой клиент/);
+            assert.equal(app.timers.size, 0);
+        }
+    });
+}
+
+for (const action of ['reconnect', 'account', 'disable']) {
+    test(`late response metadata is cleared on ${action}`, async () => {
+        const app = await background();
+        const socket = await app.register(pair, true, '0', 5);
+        await app.authState(7, true); await app.authState(7, false); await app.fireTimer(1500);
+        const request = app.sent.at(-1);
+        await app.fireTimer(10000);
+        if (action === 'reconnect') {
+            await socket.close(); await app.settle();
+            await app.fireTimer(5000);
+        } else {
+            await app.save(action === 'account' ? { account: 'changed_account' } : { enabled: false });
+        }
+        assert.equal(app.context().lateRefreshes.size, 0);
+        const recovery = app.context().recovery;
+        await socket.message({ uuid: request.uuid, result: true, accepted: true, payload: pair, revision: 5 });
+        await app.settle();
+        assert.equal(app.context().recovery, recovery);
+        assert.equal(app.written.length, 2);
+    });
+}
 
 test('late refresh acknowledgement after timeout resolves recovery using the accepted server revision', async () => {
     const app = await background();

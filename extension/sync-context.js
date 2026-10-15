@@ -29,7 +29,9 @@ class CookieSyncContext {
         this.socket = null;
         this.registered = false;
         this.generation = 0;
+        this.settingsGeneration = 0;
         this.pending = new Map();
+        this.lateRefreshes = new Map();
         this.expectedChanges = new Map();
         this.applyQueue = Promise.resolve();
         this.latestPayload = [];
@@ -89,12 +91,14 @@ class CookieSyncContext {
             pending.reject(new Error('Контекст отключён'));
         }
         this.pending.clear();
+        this.lateRefreshes.clear();
         const connection = this.socket;
         this.socket = null;
         if (connection) connection.close();
         this.latestPayload = [];
         this.expectedChanges.clear();
         if (!preserveRecovery) {
+            this.settingsGeneration += 1;
             this.latestRevision = -1;
             this.authStates.clear();
             this.clearRecovery().catch(error => console.warn('[CookieSync] Could not clear login recovery:', error));
@@ -237,6 +241,15 @@ class CookieSyncContext {
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(uuid);
+                if (command === 'refresh' && recovery && this.recovery === recovery && this.socket === connection) {
+                    // Retain only correlation metadata, not a settled Promise or cookies.
+                    for (const [id, request] of this.lateRefreshes) {
+                        if (request.recovery !== recovery || request.connection !== connection) this.lateRefreshes.delete(id);
+                    }
+                    this.lateRefreshes.set(uuid, { command, connection, recovery });
+                    // Bound memory if a live but unresponsive server accumulates retries.
+                    while (this.lateRefreshes.size > 32) this.lateRefreshes.delete(this.lateRefreshes.keys().next().value);
+                }
                 reject(new Error('Request timeout'));
             }, 10000);
             this.pending.set(uuid, { resolve, reject, timer, connection, command, recovery });
@@ -294,7 +307,9 @@ class CookieSyncContext {
         catch (error) { console.warn('[CookieSync] Invalid server JSON:', error); return; }
         if (!response || typeof response !== 'object') return;
         if (response.command === 'set') {
-            this.applyCookies(response.payload, response.revision);
+            this.applyCookies(response.payload, response.revision).catch(error => {
+                console.warn('[CookieSync] Could not process server push:', error);
+            });
             return;
         }
         const pending = this.pending.get(response.uuid);
@@ -306,20 +321,39 @@ class CookieSyncContext {
                 pending.reject(new Error(response.message || 'Request failed'));
                 return;
             }
-            const applyResponse = async () => {
-                if (pending.command === 'refresh' && this.recovery === pending.recovery
-                    && typeof response.accepted === 'boolean' && Number.isInteger(response.revision)) {
-                    await this.clearRecovery();
-                }
-                if (!this.isCurrent(connection, generation)) return false;
-                return this.applyCookies(response.payload, response.revision);
-            };
-            applyResponse().then(
+            this.applyResponse(response, pending, connection, generation).then(
                 applied => pending.resolve({ ...response, applied }), pending.reject,
             );
-        } else if (response.uuid && Array.isArray(response.payload) && Number.isInteger(response.revision)) {
-            this.applyCookies(response.payload, response.revision);
+        } else if (response.uuid && response.result === true
+            && Array.isArray(response.payload) && Number.isInteger(response.revision)) {
+            const late = this.lateRefreshes.get(response.uuid);
+            const generation = this.generation;
+            const resolvesRecovery = late?.connection === connection && this.acknowledgesRecovery(response, late);
+            this.lateRefreshes.delete(response.uuid);
+            this.applyResponse(response, late?.connection === connection ? late : null, connection, generation).then(applied => {
+                if (resolvesRecovery && this.isCurrent(connection, generation) && this.registered
+                    && !this.recovery && response.revision === this.latestRevision) {
+                    this.updateSyncStatus({ ...response, applied }, true);
+                }
+            }).catch(error => console.warn('[CookieSync] Could not process late server response:', error));
+        } else if (response.uuid) {
+            this.lateRefreshes.delete(response.uuid);
         }
+    }
+
+    /** Проверяет успешный протокольный ответ именно на текущую попытку refresh. */
+    acknowledgesRecovery(response, request) {
+        return request?.command === 'refresh' && request.recovery && this.recovery === request.recovery
+            && response.result === true && typeof response.accepted === 'boolean'
+            && Number.isInteger(response.revision) && response.revision >= 0 && Array.isArray(response.payload);
+    }
+
+    /** Применяет обычный или поздний ответ, снимая только коррелированную попытку входа. */
+    async applyResponse(response, request, connection, generation) {
+        if (!this.isCurrent(connection, generation)) return false;
+        if (this.acknowledgesRecovery(response, request)) await this.clearRecovery();
+        if (!this.isCurrent(connection, generation)) return false;
+        return this.applyCookies(response.payload, response.revision);
     }
 
     /**
@@ -341,32 +375,32 @@ class CookieSyncContext {
         if (!cookies.length) {
             if (Array.isArray(payload) && !payload.length && Number.isInteger(revision)
                 && revision >= this.latestRevision) {
-                this.latestRevision = revision;
+                const revisionSaved = this.rememberRevision(revision);
                 this.latestPayload = [];
                 this.initialPending = true;
                 clearTimeout(this.remoteRetryTimer);
                 this.remoteRetryTimer = null;
                 if (this.recovery && revision > this.recovery.expectedRevision) {
-                    return this.clearRecovery().then(() => false);
+                    return Promise.all([revisionSaved, this.clearRecovery()]).then(() => false);
                 }
+                return revisionSaved.then(() => false);
             }
             return Promise.resolve(false);
         }
         if (Number.isInteger(revision)) {
             if (revision < this.latestRevision) return Promise.resolve(true);
-            this.latestRevision = revision;
         }
         this.latestPayload = cookies.map(pickCookieFields);
         this.initialPending = false;
-        let recoverySaved = Promise.resolve();
+        let recoverySaved = this.rememberRevision(revision);
         const resolvedLogin = this.recovery && Number.isInteger(revision) && revision > this.recovery.expectedRevision;
         if (resolvedLogin) {
             // A newer revision wins. Do not rebase an old login attempt onto it.
-            recoverySaved = this.clearRecovery();
+            recoverySaved = Promise.all([recoverySaved, this.clearRecovery()]);
         }
         const heldForLogin = () => this.recovery
             && (!Number.isInteger(revision) || revision <= this.recovery.expectedRevision);
-        if (heldForLogin()) return Promise.resolve(false);
+        if (heldForLogin()) return recoverySaved.then(() => false);
         clearTimeout(this.remoteRetryTimer);
         this.remoteRetryTimer = null;
         const connection = this.socket;
@@ -415,12 +449,23 @@ class CookieSyncContext {
         return this.applyQueue;
     }
 
-    /** Возвращает сериализуемые наблюдения входа для storage.session без inFlight. */
+    /** Сохраняет новую известную ревизию вместе с живыми наблюдениями входа в session. */
+    rememberRevision(revision) {
+        if (!Number.isInteger(revision) || revision <= this.latestRevision) return Promise.resolve();
+        this.latestRevision = revision;
+        if (!this.recovery && !this.authStates.size) return Promise.resolve();
+        return this.recoveryChanged(this).catch(error => {
+            console.warn('[CookieSync] Could not persist the known revision:', error);
+        });
+    }
+
+    /** Возвращает ревизию и наблюдения живых login-вкладок для session без cookies/inFlight. */
     snapshotRecovery() {
         if (!this.recovery && !this.authStates.size) return null;
         return {
             account: this.settings.account, serverUrl: this.settings.serverUrl, contextId: this.contextId,
             cookieDomains: [...this.settings.cookieDomains],
+            latestRevision: this.latestRevision,
             ...(this.recovery ? { tabId: this.recovery.tabId,
                 expectedRevision: this.recovery.expectedRevision, ready: this.recovery.ready } : {}),
             observations: [...this.authStates].map(([tabId, state]) => ({ ...state, tabId, retired: [...state.retired] })),
@@ -438,6 +483,9 @@ class CookieSyncContext {
                 this.authStates.set(state.tabId, { ...state, retired: new Set(state.retired || []) });
             }
         }
+        if (this.authStates.size && Number.isInteger(record.latestRevision) && record.latestRevision >= 0) {
+            this.latestRevision = Math.max(this.latestRevision, record.latestRevision);
+        }
         if (this.tabIds.has(record.tabId) && Number.isInteger(record.expectedRevision) && record.expectedRevision >= 0) {
             this.recovery = { tabId: record.tabId, expectedRevision: record.expectedRevision,
                 ready: record.ready === true, inFlight: false };
@@ -451,6 +499,7 @@ class CookieSyncContext {
             this.syncTimer = null;
         }
         this.recovery = null;
+        this.lateRefreshes.clear();
         return this.recoveryChanged(this);
     }
 
@@ -459,9 +508,10 @@ class CookieSyncContext {
      * Видимый логин закрепляет текущую ревизию; его исчезновение разрешает refresh.
      * documentId/sequence отсекают старые документы и сообщения без перебазирования
      * попытки входа на более новую серверную ревизию.
+     * knownRevision фиксируется при получении события, до ожидания очереди менеджера.
      */
-    async authStateChanged(tabId, state) {
-        const generation = this.generation;
+    async authStateChanged(tabId, state, knownRevision = this.latestRevision) {
+        const settingsGeneration = this.settingsGeneration;
         if (!this.alive || !this.settings.enabled || !this.tabIds.has(tabId)
             || state.ready !== true || typeof state.loginVisible !== 'boolean'
             || state.authenticated !== !state.loginVisible
@@ -475,16 +525,16 @@ class CookieSyncContext {
         if (previous && previous.documentId !== state.documentId) retired.add(previous.documentId);
         const sameDialog = previous?.documentId === state.documentId && previous.loginVisible;
         const observedRevision = state.loginVisible
-            ? (sameDialog && previous.observedRevision >= 0 ? previous.observedRevision : this.latestRevision)
+            ? (sameDialog && previous.observedRevision >= 0 ? previous.observedRevision : knownRevision)
             : (previous?.observedRevision ?? -1);
         this.authStates.set(tabId, {
             documentId: state.documentId, sequence: state.sequence, ready: state.ready,
             loginVisible: state.loginVisible, authenticated: state.authenticated,
-            observedRevision, retired, waitingForRevision: state.loginVisible && this.latestRevision < 0,
+            observedRevision, retired, waitingForRevision: state.loginVisible && observedRevision < 0,
         });
         let shouldSync = false;
         if (state.loginVisible) {
-            if (this.latestRevision >= 0 && (!this.recovery
+            if (observedRevision >= 0 && observedRevision === this.latestRevision && (!this.recovery
                 || (this.recovery.tabId === tabId && !previous?.loginVisible))) {
                 this.recovery = { tabId, expectedRevision: observedRevision, ready: false, inFlight: false };
                 clearTimeout(this.remoteRetryTimer);
@@ -503,7 +553,7 @@ class CookieSyncContext {
             shouldSync = true;
         }
         await this.recoveryChanged(this);
-        if (shouldSync && this.alive && generation === this.generation) this.scheduleSync();
+        if (shouldSync && this.alive && settingsGeneration === this.settingsGeneration) this.scheduleSync();
     }
 
     /** Удаляет наблюдения закрытой/ушедшей из office вкладки и связанный recovery. */
@@ -628,24 +678,29 @@ class CookieSyncContext {
             }
             const response = await this.sendCommand(recovery ? 'refresh' : 'set', payload, recovery);
             if (!current()) return;
-            this.initialPending = Array.isArray(response.payload) && response.payload.length === 0;
-            if (response.accepted === false && this.initialPending) {
-                // An account can be empty after expiry cleanup. Initialize it via
-                // ordinary set; never rebase the failed refresh onto a new revision.
-                this.setPhase('online', 'Серверное хранилище пусто; проверка локальных cookies');
-                this.scheduleSync(true);
-            } else if (response.accepted === false) {
-                this.setPhase('online', recovery ? 'Другой клиент уже обновил сессию; используется серверная ревизия'
-                    : `Обновление заблокировано ещё на ${response.retry_after || 0} с`);
-            } else {
-                this.setPhase('online', response.applied ? '' : 'Cookies сохранены на сервере, локальное применение ожидается');
-            }
+            this.updateSyncStatus(response, Boolean(recovery));
         } catch (error) {
             console.warn(`[CookieSync] Cookie sync failed for ${this.storeId}:`, error);
             if (current() && recovery && this.recovery === recovery) this.setPhase('error', `Обновление после входа не выполнено: ${error.message}. Проверьте версию сервера`);
             else if (current() && this.initialPending) this.setPhase('online', 'Cookies не отправлены: ошибка чтения или отправки');
         } finally {
             if (submittedRecovery) submittedRecovery.inFlight = false;
+        }
+    }
+
+    /** Завершает обычную или поздно подтверждённую отправку без перебазирования refresh. */
+    updateSyncStatus(response, refreshed) {
+        this.initialPending = Array.isArray(response.payload) && response.payload.length === 0;
+        if (response.accepted === false && this.initialPending) {
+            // An account can be empty after expiry cleanup. Initialize it via
+            // ordinary set; never rebase the failed refresh onto a new revision.
+            this.setPhase('online', 'Серверное хранилище пусто; проверка локальных cookies');
+            this.scheduleSync(true);
+        } else if (response.accepted === false) {
+            this.setPhase('online', refreshed ? 'Другой клиент уже обновил сессию; используется серверная ревизия'
+                : `Обновление заблокировано ещё на ${response.retry_after || 0} с`);
+        } else {
+            this.setPhase('online', response.applied ? '' : 'Cookies сохранены на сервере, локальное применение ожидается');
         }
     }
 

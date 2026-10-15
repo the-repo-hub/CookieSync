@@ -625,6 +625,13 @@ when its saved connection settings are invalid; never apply new settings through
 the internal disable-only operation.
 Keep the last known revision across reconnect of the same account so a login
 observed while disconnected can pin it. Clear it when changing settings/disposal.
+Persist the known revision with live login-tab observations in storage.session,
+including newer revisions learned from pushes. Restore it only for matching
+settings and surviving observed tabs. Queue DOM observations by settings/context
+lifetime, not socket generation; preserve the revision observed at receipt.
+Keep bounded UUID metadata for timed-out refresh requests on the same connection.
+A late idempotent acknowledgement can complete only its own recovery attempt;
+clear that metadata on recovery completion, disconnect, settings change/disposal.
 
 Expected lifecycle:
 
