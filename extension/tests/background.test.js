@@ -146,6 +146,7 @@ async function background(options = {}) {
     }
 
     const sandbox = vm.createContext({
+        Date: class extends Date { static now() { return state.now ?? Date.now(); } },
         browser, WebSocket: Socket, URL, crypto: { randomUUID }, structuredClone,
         console: Object.fromEntries(['log', 'warn', 'error', 'debug'].map(level => [level, (...args) => logs.push(args.join(' '))])),
         setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
@@ -212,6 +213,100 @@ async function background(options = {}) {
     return { state, browser, sockets, sent, written, reads, authTabs, installed, localWrites, notices, logs,
         timers, context, request, view, save, register, fireTimer, settle, authState };
 }
+
+test('expired registration never deletes fresh local cookies and can initialize the server', async () => {
+    const app = await background({ cookies: pairB, now: 2000 });
+    const expiredPair = pair.map((cookie, index) => ({ ...cookie, ...(index ? {} : { expirationDate: 2 }) }));
+    await app.register(expiredPair, true, '0', 5);
+    assert.equal(app.written.length, 0);
+    assert.equal(app.context().latestRevision, 5);
+    assert.equal(app.context().latestPayload.length, 0);
+    assert.ok(![...app.timers.values()].some(timer => timer.delay === 1000));
+    await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'set');
+    assert.deepEqual(app.sent.at(-1).payload, pairB);
+});
+
+test('a pair expiring in the application queue is not written or retried', async () => {
+    const app = await background({ now: 1000 });
+    const socket = await app.register(pair, true, '0', 1);
+    let release;
+    app.context().applyQueue = new Promise(resolve => { release = resolve; });
+    const expiringPair = pairB.map(cookie => ({ ...cookie, expirationDate: 2 }));
+    await socket.message({ command: 'set', payload: expiringPair, revision: 2 });
+    app.state.now = 2000;
+    release();
+    await app.context().applyQueue;
+    assert.equal(app.written.length, 2);
+    assert.equal(app.context().latestPayload.length, 0);
+    assert.equal(app.context().latestRevision, 2);
+    assert.equal(app.timers.size, 0);
+});
+
+test('cookie retry stops once the pair expires and does not suppress a later local change', async () => {
+    const app = await background({ now: 1000, failStoreIds: ['0'] });
+    const expiringPair = pair.map(cookie => ({ ...cookie, expirationDate: 2 }));
+    await app.register(expiringPair);
+    assert.equal(app.written.length, 1);
+    app.state.now = 2000;
+    await app.fireTimer(1000);
+    assert.equal(app.written.length, 1);
+    assert.ok(![...app.timers.values()].some(timer => timer.delay === 1000));
+    app.state.cookies = pairB;
+    await app.browser.cookies.onChanged.emit({ cookie: { ...pairB[0], storeId: '0' }, removed: false });
+    await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'set');
+});
+
+test('expiry during the first cookie write prevents writing the second half', async () => {
+    const app = await background({ now: 1000 });
+    const socket = await app.register(pair);
+    const originalSet = app.browser.cookies.set;
+    app.browser.cookies.set = async details => {
+        const result = await originalSet(details);
+        app.state.now = 2000;
+        return result;
+    };
+    await socket.message({ command: 'set', revision: 2,
+        payload: pairB.map(cookie => ({ ...cookie, expirationDate: 2 })) });
+    await app.context().applyQueue;
+    assert.equal(app.written.length, 3, 'only the not-yet-expired first cookie was written');
+    assert.equal(app.context().latestPayload.length, 0);
+    assert.equal(app.timers.size, 0);
+});
+
+test('newer expired server revision clears an old login fence without writing cookies', async () => {
+    const app = await background({ now: 2000 });
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true);
+    await socket.message({ command: 'set', revision: 6,
+        payload: pairB.map(cookie => ({ ...cookie, expirationDate: 2 })) });
+    await app.settle();
+    assert.equal(app.context().recovery, null);
+    assert.equal(app.context().latestRevision, 6);
+    assert.equal(app.written.length, 2);
+    assert.equal(app.timers.size, 0);
+});
+
+test('an expired local pair is never sent to the server', async () => {
+    const app = await background({ now: 2000,
+        cookies: pair.map(cookie => ({ ...cookie, expirationDate: 2 })) });
+    await app.register();
+    await app.fireTimer(1500);
+    assert.deepEqual(app.sent.map(request => request.command), ['register']);
+    assert.equal(app.written.length, 0);
+});
+
+test('an expired older revision cannot clear a newer accepted pair', async () => {
+    const app = await background({ now: 2000 });
+    const socket = await app.register(pairB, true, '0', 6);
+    await socket.message({ command: 'set', revision: 5,
+        payload: pair.map(cookie => ({ ...cookie, expirationDate: 2 })) });
+    await app.settle();
+    assert.equal(app.context().latestRevision, 6);
+    assert.deepEqual([...app.context().latestPayload].map(cookie => cookie.value), pairB.map(cookie => cookie.value));
+    assert.equal(app.written.length, 2);
+});
 
 test('legacy settings migrate only to the regular context; private starts blank and disabled', async () => {
     const app = await background({ tabs: [normalTab, privateTab], local: config('old_regular') });
@@ -631,6 +726,64 @@ test('network reconnect retains the original login revision and fresh local cook
     await app.fireTimer(1500);
     assert.equal(app.sent.at(-1).command, 'refresh');
     assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
+for (const timing of ['disconnected', 'registering']) {
+    test(`login completed while ${timing} keeps the last known revision`, async () => {
+        const app = await background();
+        const socket = await app.register(pair, true, '0', 5);
+        await socket.close(); await app.settle();
+        if (timing === 'registering') await app.fireTimer(5000);
+        await app.authState(7, true);
+        app.state.cookies = pairB;
+        await app.authState(7, false);
+        assert.equal(app.context().recovery.expectedRevision, 5);
+        if (timing === 'disconnected') await app.fireTimer(5000);
+        app.written.length = 0;
+        await app.register(pair, true, '0', 5);
+        assert.equal(app.written.length, 0);
+        await app.fireTimer(1500);
+        assert.equal(app.sent.at(-1).command, 'refresh');
+        assert.equal(app.sent.at(-1).expected_revision, 5);
+        assert.deepEqual(app.sent.at(-1).payload, pairB);
+    });
+}
+
+test('offline login fence survives worker recreation but a newer server revision wins', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await socket.close(); await app.settle();
+    await app.authState(7, true);
+    await app.authState(7, false);
+    for (const revision of [5, 6]) {
+        const resumed = await background({
+            local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+            authStateByTab: structuredClone(app.state.authStateByTab), cookies: pairB,
+        });
+        await resumed.register(pair, true, '0', revision);
+        if (revision === 5) {
+            assert.equal(resumed.written.length, 0);
+            await resumed.fireTimer(1500);
+            assert.equal(resumed.sent.at(-1).command, 'refresh');
+            assert.equal(resumed.sent.at(-1).expected_revision, 5);
+        } else {
+            assert.equal(resumed.context().recovery, null);
+            assert.deepEqual(resumed.written.map(cookie => cookie.value), pair.map(cookie => cookie.value));
+            assert.ok(resumed.sent.every(request => request.command === 'register'));
+        }
+    }
+});
+
+test('changing account after disconnect discards the previous account revision', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 100);
+    await socket.close(); await app.settle();
+    await app.save({ account: 'another_account' });
+    assert.equal(app.context().latestRevision, -1);
+    app.written.length = 0;
+    await app.register(pairB, true, '0', 1);
+    assert.equal(app.context().latestRevision, 1);
+    assert.deepEqual(app.written.map(cookie => cookie.value), pairB.map(cookie => cookie.value));
 });
 
 test('an unsupported server reports an error without restoring the failed old session', async () => {

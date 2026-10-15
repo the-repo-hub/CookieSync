@@ -177,6 +177,18 @@ function describeConnectionFailure(url, primaryStatus, alternateStatus, timedOut
 }
 
 /**
+ * Проверяет срок жизни пары перед отправкой/применением, включая отложенные операции.
+ * Отсутствие expirationDate означает session-cookie; неконечный срок непригоден.
+ * @param {Object[]} cookies Уже выбранные cookies синхронизации.
+ * @param {number} [now=Date.now()] Текущее время в миллисекундах.
+ * @returns {boolean} Есть ли истёкшая cookie или некорректный срок жизни.
+ */
+function hasExpiredCookies(cookies, now = Date.now()) {
+    return cookies.some(cookie => cookie.expirationDate !== undefined
+        && (!Number.isFinite(cookie.expirationDate) || cookie.expirationDate <= now / 1000));
+}
+
+/**
  * Копирует переносимые поля cookie, исключая локальный storeId.
  * Отсутствующая expirationDate остаётся отсутствующей для сохранения session-семантики.
  * @returns {Object} Новый объект для серверной нагрузки.
@@ -320,6 +332,7 @@ if (typeof module !== 'undefined' && module.exports) {
         isCookieForSyncDomain,
         isCookieForSync,
         selectSyncCookiePair,
+        hasExpiredCookies,
         describeConnectionFailure,
         pickCookieFields,
         buildCookieUrl,

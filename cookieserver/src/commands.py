@@ -42,6 +42,7 @@ class RegisterCookiesCommand(Command):
         """Под lock привязывает клиента и возвращает текущую пару и ревизию."""
         account = await storage.get_or_create_account(request.account)
         async with account.lock:
+            await run_storage_write(account.clear_expired_payload)
             storage.add_client(websocket, account.name)
             logger.info(f"Client {websocket.remote_address} registered in account {account.name}")
             return {
@@ -105,7 +106,11 @@ class SetCookiesCommand(Command):
             }
 
     async def _send(self, websocket: ServerConnection, output: Dict):
-        """Отправляет JSON-push с таймаутом; при ошибке закрывает и логирует сокет."""
+        """Отправляет JSON-push с таймаутом; при ошибке прерывает транспорт.
+
+        Закрывающий handshake не должен продлевать ожидание под account.lock.
+        Отключённый сокет удаляется из индексов в finally обработчика соединения.
+        """
         try:
             await asyncio.wait_for(
                 websocket.send(json.dumps(output)),
@@ -114,13 +119,10 @@ class SetCookiesCommand(Command):
         except Exception:
             logger.exception(f'Failed to send cookies to {websocket.remote_address}')
             try:
-                await websocket.close(
-                    code=1011,
-                    reason='Cookie synchronization failed',
-                )
+                websocket.transport.abort()
             except Exception:
                 logger.exception(
-                    f'Failed to close stale client {websocket.remote_address}'
+                    f'Failed to abort stale client {websocket.remote_address}'
                 )
 
 

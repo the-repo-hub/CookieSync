@@ -179,6 +179,27 @@ class Account:
         remaining = self._locked_until - time.monotonic()
         return max(0, math.ceil(remaining))
 
+    def clear_expired_payload(self) -> bool:
+        """Синхронно очищает истёкшую пару и cooldown, сохраняя принятую ревизию.
+
+        Вызывать под lock через run_storage_write. Истечение любой половины
+        делает непригодной всю пару; при ошибке записи состояние откатывается.
+        """
+        now = time.time()
+        if not any('expirationDate' in cookie and cookie['expirationDate'] <= now
+                   for cookie in self.payload):
+            return False
+        previous = self.payload, self.updated_at, self._locked_until
+        self.payload = []
+        self.updated_at = 0.0
+        self._locked_until = 0.0
+        try:
+            self.write_file()
+        except OSError:
+            self.payload, self.updated_at, self._locked_until = previous
+            raise
+        return True
+
     def set_payload(self, payload, expected_revision: Optional[int] = None) -> CookieUpdateResult:
         """Синхронно сохраняет уже проверенную пару и увеличивает её ревизию.
 
@@ -425,4 +446,6 @@ class AccountStorage:
         set не должен передавать это значение из клиентского запроса.
         """
         account = self.require_account(account_name)
-        return account.set_payload(require_complete_cookie_pair(payload), expected_revision)
+        cookies = require_complete_cookie_pair(payload)
+        account.clear_expired_payload()
+        return account.set_payload(cookies, expected_revision)

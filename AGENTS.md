@@ -169,6 +169,10 @@ asyncio.Lock
 
 Cookie cleanup at startup must preserve the last valid accepted revision, even
 when the payload becomes empty. Never reuse revision numbers after expiry.
+Check stored cookie expiry during runtime register/set/refresh as well. Clear
+the whole expired pair and its cooldown under account.lock, persist the cleanup,
+and retain the revision. The client must recheck expiry before queued cookie
+writes and retries; never install a past expirationDate over a live local cookie.
 Runtime file writes run outside the event loop; keep `account.lock` held until
 the write worker finishes, including when the request coroutine is cancelled.
 Use `run_storage_write` for these operations: protect every wait against repeated
@@ -272,6 +276,9 @@ websockets_set.discard(websocket)
 ```
 
 Then close the connection safely.
+If a broadcast send fails or times out, abort its transport rather than await a
+closing handshake under account.lock. Registration cleanup still belongs in
+the connection handler's finally block.
 
 Do not assume disconnect happens only through explicit `.close()`.
 
@@ -616,6 +623,8 @@ Reconnect must preserve a recovery's pinned revision without sharing its in-flig
 ownership with tasks from the old connection. Disabling a context must work even
 when its saved connection settings are invalid; never apply new settings through
 the internal disable-only operation.
+Keep the last known revision across reconnect of the same account so a login
+observed while disconnected can pin it. Clear it when changing settings/disposal.
 
 Expected lifecycle:
 

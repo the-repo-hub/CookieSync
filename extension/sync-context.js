@@ -75,8 +75,8 @@ class CookieSyncContext {
 
     /**
      * Закрывает сокет, отменяет таймеры и отклоняет ожидающие UUID-запросы.
-     * @param {boolean} [preserveRecovery=false] При reconnect сохраняет закреплённую
-     * ревизию входа, но создаёт новый объект владения inFlight для новой связи.
+     * @param {boolean} [preserveRecovery=false] При reconnect сохраняет последнюю
+     * известную ревизию и попытку входа с новым объектом владения inFlight.
      */
     stop(preserveRecovery = false) {
         this.generation += 1;
@@ -93,9 +93,9 @@ class CookieSyncContext {
         this.socket = null;
         if (connection) connection.close();
         this.latestPayload = [];
-        this.latestRevision = -1;
         this.expectedChanges.clear();
         if (!preserveRecovery) {
+            this.latestRevision = -1;
             this.authStates.clear();
             this.clearRecovery().catch(error => console.warn('[CookieSync] Could not clear login recovery:', error));
         } else if (this.recovery) {
@@ -161,7 +161,8 @@ class CookieSyncContext {
         }
         const generation = ++this.generation;
         this.latestPayload = [];
-        this.latestRevision = -1;
+        // A login may start while disconnected or while register is pending.
+        // Its fence must use the last known revision of this same account.
         this.setPhase('connecting', this.settings.serverUrl);
         try {
             const connection = new WebSocket(this.settings.serverUrl);
@@ -176,7 +177,10 @@ class CookieSyncContext {
                     if (!this.isCurrent(connection, generation)) return;
                     this.registered = true;
                     this.initialPending = Array.isArray(response.payload)
-                        && response.payload.length === 0 && !this.latestPayload.length;
+                        && (response.payload.length === 0 || hasExpiredCookies(
+                            selectSyncCookiePair(response.payload, this.settings.cookieDomains),
+                        ))
+                        && !this.latestPayload.length;
                     this.setPhase('online', this.initialPending ? 'Проверка локальных cookies' : '');
                     if (this.initialPending || this.recovery?.ready) this.scheduleSync(!this.recovery?.ready);
                     this.watchAuthentication(connection, generation).catch(error => {
@@ -330,9 +334,21 @@ class CookieSyncContext {
     applyCookies(payload, revision) {
         const cookies = selectSyncCookiePair(payload, this.settings.cookieDomains);
         if (!this.alive || !this.settings.enabled) return Promise.resolve(false);
+        if (cookies.length && hasExpiredCookies(cookies)) {
+            console.warn('[CookieSync] Ignoring expired server cookies');
+            return this.applyCookies([], revision);
+        }
         if (!cookies.length) {
-            if (Array.isArray(payload) && !payload.length && Number.isInteger(revision)) {
-                this.latestRevision = Math.max(this.latestRevision, revision);
+            if (Array.isArray(payload) && !payload.length && Number.isInteger(revision)
+                && revision >= this.latestRevision) {
+                this.latestRevision = revision;
+                this.latestPayload = [];
+                this.initialPending = true;
+                clearTimeout(this.remoteRetryTimer);
+                this.remoteRetryTimer = null;
+                if (this.recovery && revision > this.recovery.expectedRevision) {
+                    return this.clearRecovery().then(() => false);
+                }
             }
             return Promise.resolve(false);
         }
@@ -366,6 +382,8 @@ class CookieSyncContext {
                 if (!store || !current()) return false;
                 for (const cookie of cookies) {
                     if (!current()) return false;
+                    // A valid pair can expire while queued or during an API await.
+                    if (hasExpiredCookies(cookies)) return this.applyCookies([], revision);
                     remarkExpectedRemoteChange(this.expectedChanges, { ...cookie, storeId: this.storeId });
                     const result = await browser.cookies.set(buildCookieSetDetails(
                         cookie, this.settings.cookieDomains[0], this.storeId,
@@ -599,7 +617,7 @@ class CookieSyncContext {
             const unique = new Map();
             for (const cookie of lists.flat()) unique.set(cookieKey(cookie), cookie);
             const payload = selectSyncCookiePair([...unique.values()], this.settings.cookieDomains).map(pickCookieFields);
-            if (payload.length !== 2) {
+            if (payload.length !== 2 || hasExpiredCookies(payload)) {
                 if (!recovery && this.latestPayload.length === 2) await this.applyCookies(this.latestPayload, this.latestRevision);
                 if (current() && (this.initialPending || recovery)) this.setPhase('online', 'Cookies не отправлены: нужна полная пара ASP.NET_SessionId и ResoOffice60');
                 return;

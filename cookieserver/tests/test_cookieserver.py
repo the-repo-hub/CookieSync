@@ -5,14 +5,16 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
+from websockets.asyncio.connection import Connection
 
 from cookieserver.manage import RunServerCommand, build_parser
 from cookieserver.src.choices import Commands, Fields
-from cookieserver.src.commands import SetCookiesCommand
+from cookieserver.src.commands import RegisterCookiesCommand, SetCookiesCommand
 from cookieserver.src.request import Request
 from cookieserver.src.server import Server
 from cookieserver.src.settings import (
@@ -175,6 +177,130 @@ def set_payload(account, cookies):
     }
 
 
+@pytest_asyncio.fixture
+async def runtime_expired_account(server, account, async_client, cookies_not_sample, monkeypatch) -> Account:
+    """Сохраняет пару и переводит часы к истечению одной половины без рестарта."""
+    await async_client.send_request(register_payload(account))
+    expiry = time.time() + 60
+    cookies = [dict(cookie) for cookie in cookies_not_sample]
+    cookies[0]['expirationDate'] = expiry
+    response = await async_client.send_request(set_payload(account, cookies))
+    assert response[Fields.accepted] is True
+    monkeypatch.setattr('cookieserver.src.storage.time.time', lambda: expiry)
+    account_obj = server.storage.require_account(account)
+    assert account_obj.retry_after() > 0
+    return account_obj
+
+
+class TestRuntimeExpiry:
+    """Истечение cookies на работающем сервере без повторного использования ревизий."""
+
+    @pytest.mark.asyncio
+    async def test_registration_cleans_expired_pair_and_preserves_revision(
+        self, runtime_expired_account, second_client,
+    ):
+        account: Account = runtime_expired_account
+        revision = account.revision
+        response = await second_client.send_request(register_payload(account.name))
+        assert response[Fields.result] is True
+        assert response[Fields.uuid] == second_client.last_request_uuid
+        assert response[Fields.payload] == []
+        assert response[Fields.revision] == revision
+        assert response[Fields.retry_after] == 0
+        with open(account.full_path) as file:
+            assert json.load(file) == {'payload': [], 'updated_at': 0.0, 'revision': revision}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('command', [Commands.set, Commands.refresh])
+    async def test_fresh_pair_replaces_expired_pair_during_old_cooldown(
+        self, runtime_expired_account, async_client, cookies_other, command,
+    ):
+        account: Account = runtime_expired_account
+        revision = account.revision
+        request = {**set_payload(account.name, cookies_other), Fields.command: command}
+        if command == Commands.refresh:
+            request[Fields.expected_revision] = revision
+        response = await async_client.send_request(request)
+        assert response[Fields.accepted] is True
+        assert response[Fields.revision] == revision + 1
+        assert response[Fields.payload] == cookies_other
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert AccountStorage().require_account(account.name).revision == revision + 1
+
+    @pytest.mark.asyncio
+    async def test_stale_refresh_returns_cleaned_pair_without_rebasing(
+        self, runtime_expired_account, async_client, cookies_other,
+    ):
+        account: Account = runtime_expired_account
+        revision = account.revision
+        response = await async_client.send_request({
+            **set_payload(account.name, cookies_other), Fields.command: Commands.refresh,
+            Fields.expected_revision: revision - 1,
+        })
+        assert response[Fields.accepted] is False
+        assert response[Fields.payload] == []
+        assert response[Fields.revision] == revision
+        assert response[Fields.retry_after] == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_cleanup_rolls_back_and_registration_can_retry(
+        self, runtime_expired_account, second_client, server,
+    ):
+        account: Account = runtime_expired_account
+        previous = account.payload, account.updated_at, account._locked_until, account.revision
+        with patch.object(account, 'write_file', side_effect=OSError('disk full')):
+            response = await second_client.send_request(register_payload(account.name))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == second_client.last_request_uuid
+        assert (account.payload, account.updated_at, account._locked_until, account.revision) == previous
+        assert len(server.storage.websockets_by_account[account.name]) == 1
+        response = await second_client.send_request(register_payload(account.name))
+        assert response[Fields.result] is True
+        assert response[Fields.payload] == []
+        assert response[Fields.revision] == previous[-1]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_cleanup_finishes_under_lock_and_does_not_block_other_accounts(
+        self, runtime_expired_account, server, second_client,
+    ):
+        account: Account = runtime_expired_account
+        websocket = next(iter(server.storage.websockets_by_account[account.name]))
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        original_write = account.write_file
+
+        def delayed_write():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError('Cleanup worker was not released')
+            original_write()
+
+        with patch.object(account, 'write_file', side_effect=delayed_write):
+            request = Request({**register_payload(account.name), Fields.uuid: 'cleanup'})
+            cleaning = asyncio.create_task(RegisterCookiesCommand().execute(server.storage, request, websocket))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                response = await second_client.send_request(register_payload('other_during_cleanup'))
+                assert response[Fields.result] is True
+                for _ in range(3):
+                    cleaning.cancel()
+                    turn = loop.create_future()
+                    loop.call_soon(turn.set_result, None)
+                    await turn
+                    assert account.lock.locked()
+                    assert not cleaning.done()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await cleaning
+        assert not account.lock.locked()
+        assert account.payload == []
+        restored = AccountStorage().require_account(account.name)
+        assert restored.payload == []
+        assert restored.revision == account.revision == 1
+
+
 class TestCookieServer:
     """Регистрация, рассылка, cooldown, ошибки протокола и жизненный цикл сокетов."""
 
@@ -187,6 +313,80 @@ class TestCookieServer:
             if asyncio.get_running_loop().time() - start > timeout:
                 raise TimeoutError("Condition not met")
             await asyncio.sleep(interval)
+
+    @pytest.mark.asyncio
+    async def test_broadcast_timeout_does_not_wait_for_slow_peer_close(
+        self, server, account, async_client, second_client, cookies_not_sample, monkeypatch,
+    ):
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
+        monkeypatch.setattr('cookieserver.src.commands.BROADCAST_TIMEOUT', 0.01)
+        release_close = asyncio.Event()
+        send_cancelled = asyncio.Event()
+        aborted = asyncio.Event()
+
+        class SlowPeer:
+            """Получатель с зависшей отправкой и независимо управляемым close."""
+
+            remote_address = ('slow-test-peer', 1)
+            close_called = False
+
+            def __init__(self):
+                self.transport = self
+
+            async def send(self, message):
+                try:
+                    await asyncio.Future()
+                finally:
+                    send_cancelled.set()
+
+            async def close(self, **kwargs):
+                self.close_called = True
+                await release_close.wait()
+
+            def abort(self):
+                aborted.set()
+
+        peer = SlowPeer()
+        server.storage.add_client(peer, account)
+        try:
+            response = await async_client.send_request(set_payload(account, cookies_not_sample), timeout=1)
+            assert response[Fields.result] is True
+            assert response[Fields.accepted] is True
+            assert response[Fields.uuid] == async_client.last_request_uuid
+            assert send_cancelled.is_set()
+            assert aborted.is_set()
+            assert not peer.close_called
+            assert not server.storage.require_account(account).lock.locked()
+            push = await second_client.recv_server_message()
+            assert push[Fields.command] == Commands.set
+            assert Fields.uuid not in push
+            assert push[Fields.payload] == cookies_not_sample
+            following = await second_client.send_request(register_payload(account), timeout=1)
+            assert following[Fields.revision] == response[Fields.revision]
+        finally:
+            release_close.set()
+            server.storage.remove_client(peer)
+
+    @pytest.mark.asyncio
+    async def test_failed_broadcast_aborts_real_connection_and_cleans_registration(
+        self, server, account, async_client, second_client, cookies_not_sample,
+    ):
+        await async_client.send_request(register_payload(account))
+        await second_client.send_request(register_payload(account))
+        peer: Connection = next(ws for ws in server.storage.websockets_by_account[account]
+                                if ws.remote_address == second_client.ws.local_address)
+
+        async def failed_send(message):
+            raise OSError('simulated transport failure')
+
+        with patch.object(peer, 'send', new=failed_send):
+            response = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.accepted] is True
+        await asyncio.wait_for(peer.wait_closed(), timeout=1)
+        await self.wait_until(lambda: peer not in server.storage._ws_accounts)
+        assert peer not in server.storage.websockets_by_account[account]
+        assert len(server.storage.websockets_by_account[account]) == 1
 
     @pytest.mark.asyncio
     async def test_register(self, server, account, async_client):

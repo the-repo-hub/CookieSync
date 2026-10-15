@@ -12,6 +12,7 @@ const {
     isCookieForSyncDomain,
     isCookieForSync,
     selectSyncCookiePair,
+    hasExpiredCookies,
     describeConnectionFailure,
     pickCookieFields,
     buildCookieUrl,
@@ -19,6 +20,15 @@ const {
     remarkExpectedRemoteChange,
     isExpectedRemoteChange,
 } = require('../logic.js');
+
+test('cookie expiry respects seconds, boundary and session semantics', () => {
+    const now = 2000;
+    assert.equal(hasExpiredCookies([{ name: 'session' }], now), false);
+    assert.equal(hasExpiredCookies([{ expirationDate: 2.001 }], now), false);
+    for (const expirationDate of [2, 1, null, '3', NaN, Infinity]) {
+        assert.equal(hasExpiredCookies([{}, { expirationDate }], now), true);
+    }
+});
 
 test('normalizeDomain: точка, регистр, пусто', () => {
     assert.equal(normalizeDomain('.reso.ru'), 'reso.ru');
