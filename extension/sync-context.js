@@ -1,6 +1,20 @@
-// One independent client per browser cookie store. No state or cookies are
-// copied between instances, even when their settings happen to be identical.
+/**
+ * @file Синхронизация одного cookie store: сокет, UUID, cookies и повторный вход.
+ */
+
+/**
+ * Независимый клиент одного браузерного хранилища cookies.
+ * Очереди, ревизии, таймеры и маркеры не разделяются между экземплярами.
+ * generation обесценивает async-операции после смены соединения или настроек.
+ */
 class CookieSyncContext {
+    /**
+     * @param {Object} store Локальный store с id, incognito и живыми tabIds.
+     * @param {Object} settings Исходные настройки; включённые запускают соединение.
+     * @param {Function} notify Синхронное уведомление менеджера об изменении статуса.
+     * @param {string} [contextId] Идентификатор текущего времени жизни контекста.
+     * @param {Function} [recoveryChanged] Async-сохранение снимка входа в storage.session.
+     */
     constructor(store, settings, notify, contextId = crypto.randomUUID(), recoveryChanged = async () => {}) {
         this.storeId = store.id;
         this.incognito = store.incognito;
@@ -30,6 +44,7 @@ class CookieSyncContext {
         this.configure(settings);
     }
 
+    /** Возвращает UI-снимок статуса с копией настроек и списка доменов. */
     status() {
         return {
             contextId: this.contextId, storeId: this.storeId, incognito: this.incognito,
@@ -39,6 +54,7 @@ class CookieSyncContext {
         };
     }
 
+    /** Обновляет фазу и сообщение ошибки живого контекста, уведомляя менеджер. */
     setPhase(phase, detail = '') {
         if (!this.alive) return;
         this.phase = phase;
@@ -48,6 +64,7 @@ class CookieSyncContext {
         this.notify(this);
     }
 
+    /** Применяет изменившиеся настройки через остановку и, при включении, подключение. */
     configure(settings) {
         const normalized = normalizeSyncSettings(settings);
         if (!this.alive || JSON.stringify(normalized) === JSON.stringify(this.settings)) return;
@@ -56,6 +73,11 @@ class CookieSyncContext {
         if (normalized.enabled && normalized.account) this.connect();
     }
 
+    /**
+     * Закрывает сокет, отменяет таймеры и отклоняет ожидающие UUID-запросы.
+     * @param {boolean} [preserveRecovery=false] При reconnect сохраняет закреплённую
+     * ревизию входа, но создаёт новый объект владения inFlight для новой связи.
+     */
     stop(preserveRecovery = false) {
         this.generation += 1;
         this.registered = false;
@@ -84,6 +106,10 @@ class CookieSyncContext {
         this.setPhase('idle');
     }
 
+    /**
+     * Завершает время жизни контекста и очищает его настройки и вкладки.
+     * @returns {Promise} Завершение очереди cookies перед повторным использованием storeId.
+     */
     dispose() {
         this.stop();
         this.alive = false;
@@ -92,21 +118,25 @@ class CookieSyncContext {
         return this.applyQueue;
     }
 
+    /** Проверяет, что async-операция всё ещё относится к активному открытому сокету. */
     isCurrent(connection, generation) {
         return this.alive && this.settings.enabled && this.socket === connection
             && this.generation === generation && connection?.readyState === WebSocket.OPEN;
     }
 
+    /** Находит живой store; приватный дополнительно должен содержать известную вкладку. */
     async currentStore() {
         const stores = await browser.cookies.getAllCookieStores();
         return stores.find(store => store.id === this.storeId
             && (!this.incognito || store.tabIds.some(id => this.tabIds.has(id))));
     }
 
+    /** Восстанавливает соединение включённого контекста при пробуждении alarm. */
     keepAlive() {
         if (this.alive && this.settings.enabled) this.connect();
     }
 
+    /** Планирует единственный reconnect через 5 секунд для включённого контекста. */
     scheduleReconnect() {
         if (!this.alive || !this.settings.enabled || this.reconnectTimer !== null) return;
         this.reconnectTimer = setTimeout(() => {
@@ -115,6 +145,11 @@ class CookieSyncContext {
         }, 5000);
     }
 
+    /**
+     * Открывает один WebSocket и регистрирует аккаунт после события open.
+     * Повторный вызов при OPEN/CONNECTING ничего не создаёт; обработчики событий
+     * проверяют принадлежность сокета текущему поколению контекста.
+     */
     connect() {
         if (!this.alive || !this.settings.enabled || !this.settings.account
             || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
@@ -181,6 +216,14 @@ class CookieSyncContext {
         }
     }
 
+    /**
+     * Отправляет запрос с новым UUID и таймаутом ответа 10 секунд.
+     * @param {string} command Команда серверного протокола.
+     * @param {Object|Object[]} payload Нагрузка команды.
+     * @param {Object|null} [recovery=null] Попытка refresh с закреплённой expectedRevision.
+     * @returns {Promise<Object>} Только коррелированный ответ после обработки cookies;
+     * сетевые ошибки, отказ сервера и таймаут отклоняют Promise.
+     */
     sendCommand(command, payload, recovery = null) {
         const connection = this.socket;
         if (!this.alive || !this.settings.enabled || connection?.readyState !== WebSocket.OPEN) {
@@ -206,6 +249,7 @@ class CookieSyncContext {
         });
     }
 
+    /** Пробует HTTP/HTTPS серверного узла и возвращает подсказку о сбое соединения. */
     async diagnoseConnection(url) {
         const parsed = new URL(url);
         const primaryScheme = parsed.protocol === 'wss:' ? 'https' : 'http';
@@ -217,6 +261,10 @@ class CookieSyncContext {
         return describeConnectionFailure(url, primary.status, alternate.status, primary.timedOut || alternate.timedOut);
     }
 
+    /**
+     * Диагностирует доступность узла без credentials с таймаутом 4 секунды.
+     * @returns {Promise<{status: number|null, timedOut: boolean}>} HTTP-код или ошибка.
+     */
     async probeEndpoint(url) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 4000);
@@ -232,6 +280,10 @@ class CookieSyncContext {
         }
     }
 
+    /**
+     * Разделяет push set и ответы по UUID, учитывая сокет ожидающего запроса.
+     * Поздний ответ без ожидателя может обновить cookies, но не завершает другой запрос.
+     */
     handleMessage(message, connection) {
         let response;
         try { response = JSON.parse(message); }
@@ -266,6 +318,15 @@ class CookieSyncContext {
         }
     }
 
+    /**
+     * Ставит применение серверной пары в последовательную очередь этого store.
+     * Более старые ревизии игнорируются; пара закреплённой ревизии удерживается
+     * на время входа, а более новая завершает recovery. Ошибка записи планирует повтор.
+     * @param {Object[]} payload Серверные cookies без доверия к их storeId.
+     * @param {number} revision Серверная ревизия; учитывается только целое значение.
+     * @returns {Promise<boolean>} true при применении или уже известной более новой
+     * ревизии; false при пустой паре, удержании, отмене либо ошибке записи.
+     */
     applyCookies(payload, revision) {
         const cookies = selectSyncCookiePair(payload, this.settings.cookieDomains);
         if (!this.alive || !this.settings.enabled) return Promise.resolve(false);
@@ -336,6 +397,7 @@ class CookieSyncContext {
         return this.applyQueue;
     }
 
+    /** Возвращает сериализуемые наблюдения входа для storage.session без inFlight. */
     snapshotRecovery() {
         if (!this.recovery && !this.authStates.size) return null;
         return {
@@ -347,6 +409,7 @@ class CookieSyncContext {
         };
     }
 
+    /** Восстанавливает fence ревизии только для совпавших настроек и живых вкладок. */
     restoreRecovery(record) {
         if (!record || !this.settings.enabled || record.account !== this.settings.account
             || record.serverUrl !== this.settings.serverUrl
@@ -363,6 +426,7 @@ class CookieSyncContext {
         }
     }
 
+    /** Снимает попытку входа и её debounce, возвращая Promise сохранения метаданных. */
     clearRecovery() {
         if (this.recovery) {
             clearTimeout(this.syncTimer);
@@ -372,6 +436,12 @@ class CookieSyncContext {
         return this.recoveryChanged(this);
     }
 
+    /**
+     * Принимает упорядоченное наблюдение DOM от вкладки данного контекста.
+     * Видимый логин закрепляет текущую ревизию; его исчезновение разрешает refresh.
+     * documentId/sequence отсекают старые документы и сообщения без перебазирования
+     * попытки входа на более новую серверную ревизию.
+     */
     async authStateChanged(tabId, state) {
         const generation = this.generation;
         if (!this.alive || !this.settings.enabled || !this.tabIds.has(tabId)
@@ -418,6 +488,7 @@ class CookieSyncContext {
         if (shouldSync && this.alive && generation === this.generation) this.scheduleSync();
     }
 
+    /** Удаляет наблюдения закрытой/ушедшей из office вкладки и связанный recovery. */
     tabRemoved(tabId) {
         this.authStates.delete(tabId);
         if (this.recovery?.tabId === tabId) {
@@ -427,6 +498,7 @@ class CookieSyncContext {
         }
     }
 
+    /** Запрашивает DOM-вердикт вкладки, при необходимости внедряя content script. */
     async readAuthentication(tabId) {
         let reply = await this.withTimeout(browser.tabs.sendMessage(tabId, { type: 'cookiesyncCheckAuthState' }));
         if (!reply || typeof reply.authenticated !== 'boolean') {
@@ -439,12 +511,19 @@ class CookieSyncContext {
         return reply;
     }
 
+    /** Запрашивает начальные наблюдения входа, если соединение всё ещё актуально. */
     async watchAuthentication(connection, generation) {
         const store = await this.currentStore();
         if (!store || !this.isCurrent(connection, generation)) return;
         await this.isAuthenticated(store);
     }
 
+    /**
+     * Подтверждает вход через content script только во вкладках указанного store.
+     * @param {Object} store Свежий снимок cookie store с tabIds.
+     * @param {number|null} [requiredTabId=null] Ограничивает проверку вкладкой recovery.
+     * @returns {Promise<boolean>} false, если подходящих вкладок или ответа нет.
+     */
     async isAuthenticated(store, requiredTabId = null) {
         const generation = this.generation;
         const tabs = await browser.tabs.query({ url: ['*://office.reso.ru/*'] });
@@ -462,6 +541,7 @@ class CookieSyncContext {
         return false;
     }
 
+    /** Возвращает результат Promise либо undefined при отказе/таймауте в 3 секунды. */
     withTimeout(promise) {
         return new Promise(resolve => {
             const timer = setTimeout(() => resolve(undefined), 3000);
@@ -470,6 +550,7 @@ class CookieSyncContext {
         });
     }
 
+    /** Перезапускает debounce в 1500 мс; initialOnly ограничивает отправку пустым аккаунтом. */
     scheduleSync(initialOnly = false) {
         if (!this.alive || !this.settings.enabled || !this.registered) return;
         clearTimeout(this.syncTimer);
@@ -479,6 +560,12 @@ class CookieSyncContext {
         }, 1500);
     }
 
+    /**
+     * После подтверждения входа читает полную пару своего store и отправляет set/refresh.
+     * Ожидает applyQueue и повторно проверяет поколение после async-операций.
+     * Recovery владеет inFlight до finally; конфликт не переносит попытку на новую ревизию.
+     * @param {boolean} [initialOnly=false] Отправлять только при initialPending.
+     */
     async syncCookies(initialOnly = false) {
         const connection = this.socket;
         const generation = this.generation;
@@ -544,6 +631,7 @@ class CookieSyncContext {
         }
     }
 
+    /** Отсекает чужие cookies и ожидаемые удалённые изменения перед debounce. */
     cookieChanged(change) {
         const cookie = change.cookie;
         if (cookie.storeId !== this.storeId || !isCookieForSync(cookie, this.settings.cookieDomains)) return;
@@ -551,6 +639,7 @@ class CookieSyncContext {
         this.scheduleSync();
     }
 
+    /** Очищает вход при уходе из office и повторяет начальную отправку после загрузки. */
     tabUpdated(tabId, changeInfo, tab) {
         if (tab.url) {
             try {

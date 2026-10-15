@@ -1,8 +1,9 @@
-// Content script для office.reso.ru: сообщает фоновому скрипту, аутентифицирован
-// ли пользователь. Признак входа — отсутствие видимого окна логина РЕСО Офис:
-//
-//   <div id="clbkAuth_ASPxPopupControl1_loginTitle2" class="login-title">
-//       Добро пожаловать в РЕСО Офис</div>
+/**
+ * @file Идемпотентный content script наблюдения входа на office.reso.ru.
+ * DOM-эвристика: после loading отсутствие видимого заголовка окна логина
+ * #clbkAuth_ASPxPopupControl1_loginTitle2 считается подтверждением входа.
+ * documentId и sequence позволяют background отсеивать устаревшие наблюдения.
+ */
 
 // Может подключаться повторно из background к вкладке, открытой до установки.
 (() => {
@@ -18,6 +19,7 @@
     let sequence = 0;
     let previous = '';
 
+    /** Проверяет layout окна логина, которое ASPx может оставлять скрытым в DOM. */
     function isLoginPopupVisible() {
         const element = document.querySelector(LOGIN_TITLE_SELECTOR);
         if (!element) {
@@ -28,6 +30,10 @@
         return element.offsetParent !== null || element.getClientRects().length > 0;
     }
 
+    /**
+     * Возвращает текущий DOM-вердикт и отправляет событие только при изменении состояния.
+     * sequence возрастает внутри одного документа; loading никогда не подтверждает вход.
+     */
     function reportState() {
         const ready = document.readyState !== 'loading';
         const loginVisible = isLoginPopupVisible();

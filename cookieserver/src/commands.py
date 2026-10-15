@@ -1,3 +1,5 @@
+"""Реестр команд протокола и обновление аккаунтов под их блокировками."""
+
 import asyncio
 import json
 import logging
@@ -15,23 +17,29 @@ from websockets.asyncio.server import ServerConnection
 logger = logging.getLogger(__name__)
 
 class Command(ABC):
+    """Обработчик команды; транспорт добавляет result и исходный uuid к ответу."""
 
     @abstractmethod
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        """Выполняет запрос от websocket и возвращает поля ответа без обёртки."""
         pass
 
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {}
 
 def register_command(name: str):
+    """Возвращает декоратор регистрации класса обработчика под именем протокола."""
     def wrapper(cls: Type[Command]):
+        """Добавляет класс в реестр, сохраняя сам декорируемый объект."""
         COMMAND_REGISTRY[name] = cls
         return cls
     return wrapper
 
 @register_command(Commands.register)
 class RegisterCookiesCommand(Command):
+    """Регистрация сокета с автоматическим созданием отсутствующего аккаунта."""
 
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        """Под lock привязывает клиента и возвращает текущую пару и ревизию."""
         account = await storage.get_or_create_account(request.account)
         async with account.lock:
             storage.add_client(websocket, account.name)
@@ -45,14 +53,22 @@ class RegisterCookiesCommand(Command):
 
 @register_command(Commands.set)
 class SetCookiesCommand(Command):
+    """Обычное обновление cookies с соблюдением интервала между изменениями."""
 
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        """Обновляет пару без обхода cooldown, игнорируя expected_revision запроса."""
         return await self._execute_update(storage, request, websocket)
 
     async def _execute_update(
         self, storage: AccountStorage, request: Request, websocket: ServerConnection,
         expected_revision: int | None = None,
     ) -> Dict:
+        """Проверяет регистрацию, пишет пару и рассылает изменения под одним lock.
+
+        expected_revision включает compare-and-swap для refresh. Файловый I/O
+        завершается до освобождения lock даже при отмене. Push не содержит uuid
+        и не отправляется инициатору; ответ всегда содержит актуальную пару.
+        """
         account = storage.require_account(request.account)
         async with account.lock:
             storage.require_registered_client(websocket, request.account)
@@ -89,6 +105,7 @@ class SetCookiesCommand(Command):
             }
 
     async def _send(self, websocket: ServerConnection, output: Dict):
+        """Отправляет JSON-push с таймаутом; при ошибке закрывает и логирует сокет."""
         try:
             await asyncio.wait_for(
                 websocket.send(json.dumps(output)),
@@ -112,6 +129,7 @@ class RefreshCookiesCommand(SetCookiesCommand):
     """Compare-and-swap replacement after a client observes a fresh login."""
 
     async def execute(self, storage: AccountStorage, request: Request, websocket: ServerConnection) -> Dict:
+        """Проверяет неотрицательную целую ревизию и выполняет условное обновление."""
         if type(request.expected_revision) is not int or request.expected_revision < 0:
             raise HandleCommandError('refresh requires a non-negative integer expected_revision')
         return await self._execute_update(storage, request, websocket, request.expected_revision)

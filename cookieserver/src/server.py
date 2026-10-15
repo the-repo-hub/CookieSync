@@ -1,3 +1,5 @@
+"""WebSocket-транспорт: TLS, UUID-корреляция, dispatch и очистка регистраций."""
+
 import asyncio
 import json
 import logging
@@ -37,10 +39,12 @@ class HandshakeFriendlyLogger(logging.LoggerAdapter):
     _HANDSHAKE_FAILED = 'opening handshake failed'
 
     def __init__(self, logger: logging.Logger, tls_enabled: bool):
+        """Сохраняет режим TLS для подсказок о несовпадении ws:// и wss://."""
         super().__init__(logger, None)
         self.tls_enabled = tls_enabled
 
     def log(self, level: int, msg: str, *args, **kwargs) -> None:
+        """Смягчает только стандартную ошибку открывающего handshake websockets."""
         if level >= logging.ERROR and msg == self._HANDSHAKE_FAILED:
             level = logging.WARNING
             kwargs.pop('exc_info', None)
@@ -49,6 +53,7 @@ class HandshakeFriendlyLogger(logging.LoggerAdapter):
         return super().log(level, msg, *args, **kwargs)
 
     def _describe_failure(self) -> str:
+        """Формирует подсказку о протоколе соединения для текущего режима сервера."""
         if self.tls_enabled:
             return (
                 'opening handshake failed (TLS server): client sent non-HTTP data. '
@@ -62,6 +67,7 @@ class HandshakeFriendlyLogger(logging.LoggerAdapter):
 
 
 class Server:
+    """Сервер с общим хранилищем и одним последовательным читателем на сокет."""
 
     def __init__(
         self,
@@ -71,6 +77,11 @@ class Server:
         certfile: str | None = None,
         keyfile: str | None = None,
     ):
+        """Загружает хранилище и параметры прослушивания без открытия порта.
+
+        Порт 0 позволяет ОС выбрать свободный порт. При use_tls пути certfile
+        и keyfile переопределяют конфигурацию; None использует её значения.
+        """
         self.host = host
         self.port = port
         self.use_tls = use_tls
@@ -80,6 +91,7 @@ class Server:
         self.storage = AccountStorage()
 
     async def _connection_processor(self, websocket: ServerConnection) -> None:
+        """Читает запросы сокета и снимает регистрацию при любом завершении."""
         remote_address = websocket.remote_address
         logger.info(f"Client connected: {remote_address}")
         try:
@@ -94,6 +106,11 @@ class Server:
         websocket: ServerConnection,
         message: str,
     ) -> None:
+        """Обрабатывает JSON-запрос и отвечает с исходным uuid, если он доступен.
+
+        Ожидаемые ошибки протокола и хранилища сообщаются клиенту. Внутренние
+        исключения логируются, но их подробности не включаются в ответ.
+        """
         request_uuid = ''
         try:
             raw_data = json.loads(message)
@@ -158,6 +175,7 @@ class Server:
             }))
 
     async def start(self) -> None:
+        """Начинает прослушивание и возвращается, когда сервер готов к подключениям."""
         ssl_context = None
         if self.use_tls:
             certfile = self.certfile or CERT_PATH
@@ -188,10 +206,12 @@ class Server:
         )
 
     async def wait_closed(self) -> None:
+        """Ожидает завершения запущенного сервера, не инициируя его остановку."""
         if self.server:
             await self.server.wait_closed()
 
     async def run(self) -> None:
+        """Запускает сервер до закрытия или отмены и гарантирует вызов stop."""
         await self.start()
         try:
             await self.wait_closed()
@@ -201,7 +221,7 @@ class Server:
             await self.stop()
 
     async def stop(self) -> None:
-
+        """Закрывает слушатель и клиентов, дожидаясь завершения обработчиков."""
         if not self.server:
             return
 

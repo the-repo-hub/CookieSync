@@ -27,7 +27,11 @@ PACKAGE_FILES = (
 
 
 def write_archive(path: Path, contents: dict[str, bytes]) -> None:
-    """Stable metadata makes repeated builds of the same sources reproducible."""
+    """Write contents (archive name -> bytes) to path with reproducible metadata.
+
+    Entries are sorted and use fixed timestamps and permissions. The parent
+    directory must exist; an existing archive is replaced.
+    """
     with ZipFile(path, 'w', compression=ZIP_DEFLATED) as archive:
         for name, content in sorted(contents.items()):
             entry = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
@@ -38,6 +42,20 @@ def write_archive(path: Path, contents: dict[str, bytes]) -> None:
 
 
 def build(release: bool = False, output: Path = OUTPUT) -> list[Path]:
+    """Build Chromium and Firefox ZIPs and write their SHA256SUMS file.
+
+    Args:
+        release: Use distribution instructions and store-specific manifests;
+            archives remain unsigned and are placed in output/release.
+        output: Base output directory, created together with missing parents.
+
+    Returns:
+        Paths of the Chromium and Firefox archives, in that order.
+
+    Raises:
+        ValueError: The source manifest version is not a valid browser version.
+        OSError: A required source cannot be read or an output cannot be written.
+    """
     source_manifest = json.loads((EXTENSION / 'manifest.json').read_text(encoding='utf-8'))
     # Read the explicit file list before creating archives: exclude tests and local data.
     contents = {name: (EXTENSION / name).read_bytes() for name in PACKAGE_FILES}

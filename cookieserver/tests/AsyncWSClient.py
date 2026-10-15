@@ -1,3 +1,5 @@
+"""Асинхронный тестовый клиент с отдельными каналами UUID-ответов и push."""
+
 import asyncio
 import json
 import logging
@@ -14,7 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncWSClient:
+    """Клиент для интеграционных тестов; только _listen читает WebSocket."""
+
     def __init__(self, name: str):
+        """Создаёт очереди и карту ожиданий; name используется в журнале."""
         self.name = name
         self.ws = None
 
@@ -29,6 +34,7 @@ class AsyncWSClient:
         self.last_request_uuid: str | None = None
 
     async def connect(self, url: str):
+        """Открывает сокет и слушатель; для тестового wss отключает проверку TLS."""
         ssl_context = None
 
         if url.startswith("wss://"):
@@ -38,6 +44,7 @@ class AsyncWSClient:
         self._listen_task = asyncio.create_task(self._listen())
 
     async def _listen(self):
+        """Передаёт UUID-ответы ожидающим Future, остальные сообщения — в очередь."""
         try:
             async for message in self.ws:
                 data = json.loads(message)
@@ -61,6 +68,7 @@ class AsyncWSClient:
             self._fail_pending(e)
 
     def _fail_pending(self, exc: BaseException):
+        """Завершает все незаконченные запросы исключением и очищает карту."""
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(exc)
@@ -72,6 +80,11 @@ class AsyncWSClient:
         payload: dict[str, Any],
         timeout: float = 5,
     ) -> dict[str, Any]:
+        """Отправляет копию payload с новым UUID v4 и ждёт только его ответ.
+
+        timeout задаётся в секундах. При таймауте возникает TimeoutError;
+        запись в карте ожиданий удаляется при любом исходе, включая отмену.
+        """
         if self.ws is None:
             raise RuntimeError("WebSocket is not connected")
 
@@ -106,20 +119,22 @@ class AsyncWSClient:
     async def send_raw(self, text: str) -> None:
         """Отправляет произвольный (возможно, битый) текст прямо в сокет.
 
-        Ответ на битый запрос сервер шлёт с пустым uuid, поэтому он не
-        коррелируется через _pending, а попадает в server_messages.
+        Не создаёт ожидающий Future. Ответ без UUID в карте _pending попадёт
+        в server_messages; для неразбираемого JSON сервер возвращает пустой uuid.
         """
         if self.ws is None:
             raise RuntimeError("WebSocket is not connected")
         await self.ws.send(text)
 
     async def recv_server_message(self, timeout: float = 5) -> dict[str, Any]:
+        """Ждёт некоррелированное сообщение из очереди, timeout — в секундах."""
         return await asyncio.wait_for(
             self.server_messages.get(),
             timeout=timeout,
         )
 
     async def close(self):
+        """Закрывает сокет и слушатель, завершая оставшиеся запросы ошибкой."""
         if self.ws is not None:
             await self.ws.close()
             self.ws = None

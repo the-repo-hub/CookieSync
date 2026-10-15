@@ -1,3 +1,5 @@
+"""Совместимая точка входа для запуска сервера с адресом, портом и режимом TLS."""
+
 import argparse
 import asyncio
 
@@ -8,6 +10,7 @@ configure_logging('INFO')
 
 
 def main():
+    """Разбирает аргументы процесса и запускает сервер до завершения или Ctrl+C."""
     parser = argparse.ArgumentParser(
         description="Reso socket server for accounts"
     )

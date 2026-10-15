@@ -1,9 +1,24 @@
-// Чистые функции, общие для background и popup.
-// В расширении подключаются как обычные глобальные функции
-// (importScripts / <script>), в Node.js для тестов — как модуль.
+/**
+ * @file Чистые функции настроек, cookies и защиты от циклов синхронизации.
+ * В браузере доступны как глобальные функции через importScripts или script;
+ * в Node.js экспортируются через module.exports. Браузерные API не вызываются.
+ */
+
+/**
+ * @typedef {Object} SyncSettings
+ * @property {string} account Имя серверного аккаунта.
+ * @property {string} serverUrl Адрес WebSocket-сервера.
+ * @property {string[]} cookieDomains Разрешённые домены cookies.
+ * @property {boolean} enabled Запрошенное состояние синхронизации.
+ */
 
 const SYNC_COOKIE_NAMES = ['ASP.NET_SessionId', 'ResoOffice60'];
 
+/**
+ * Удаляет пробелы по краям ввода и дополняет настройки значениями по умолчанию.
+ * @param {Object} [settings={}] Текущие или старые настройки с cookieDomain.
+ * @returns {SyncSettings} Новый объект; валидность URL и аккаунта не проверяется.
+ */
 function normalizeSyncSettings(settings = {}) {
     const domains = parseDomains(settings.cookieDomains ?? settings.cookieDomain);
     return {
@@ -15,6 +30,12 @@ function normalizeSyncSettings(settings = {}) {
     };
 }
 
+/**
+ * Нормализует настройки, проверяет ws/wss без фрагмента и аккаунт при включении.
+ * @param {Object} settings Настройки одного cookie store.
+ * @returns {SyncSettings} Нормализованные настройки.
+ * @throws {Error} При неверном URL или пустом аккаунте включённого контекста.
+ */
 function validateSyncSettings(settings) {
     const result = normalizeSyncSettings(settings);
     let url;
@@ -32,10 +53,16 @@ function validateSyncSettings(settings) {
     return result;
 }
 
+/** Приводит домен к нижнему регистру и удаляет одну ведущую точку. */
 function normalizeDomain(domain) {
     return String(domain || '').replace(/^\./, '').toLowerCase();
 }
 
+/**
+ * Разбирает список или строку доменов через запятую, удаляя пробелы и пустые элементы.
+ * @param {string|string[]|undefined} value Исходное значение настройки.
+ * @returns {string[]} Новый список без проверки синтаксиса и удаления дубликатов.
+ */
 function parseDomains(value) {
     if (Array.isArray(value)) {
         return value.map(String).map(s => s.trim()).filter(Boolean);
@@ -46,17 +73,23 @@ function parseDomains(value) {
     return [];
 }
 
+/** Возвращает ключ domain/path/name внутри одного store; ведущая точка незначима. */
 function cookieKey(cookie) {
     return `${normalizeDomain(cookie.domain)}|${cookie.path || '/'}|${cookie.name}`;
 }
 
+/** Дополняет ключ cookie локальным storeId для изоляции маркеров изменений. */
 function cookieStoreKey(cookie) {
     return `${cookie.storeId || ''}|${cookieKey(cookie)}`;
 }
 
-// Домен куки принадлежит одному из целевых доменов:
-// domain === target || domain.endsWith('.' + target).
-// Не используем substring-матчинг: evilreso.ru не должен подходить под reso.ru.
+/**
+ * Проверяет точное совпадение домена или его поддомен с границей по точке.
+ * Например, evilreso.ru не подходит под reso.ru.
+ * @param {Object} cookie Cookie с полем domain.
+ * @param {string[]} domains Настроенные целевые домены.
+ * @returns {boolean} Принадлежность хотя бы одному целевому домену.
+ */
 function isCookieForSyncDomain(cookie, domains) {
     const domain = normalizeDomain(cookie && cookie.domain);
     if (!domain) {
@@ -68,6 +101,7 @@ function isCookieForSyncDomain(cookie, domains) {
     });
 }
 
+/** Проверяет разрешённое имя cookie и принадлежность настроенному домену. */
 function isCookieForSync(cookie, domains) {
     return Boolean(
         cookie
@@ -76,6 +110,12 @@ function isCookieForSync(cookie, domains) {
     );
 }
 
+/**
+ * Выбирает ровно по одной cookie каждого разрешённого имени в стабильном порядке.
+ * @param {Object[]} cookies Cookies одного store; посторонние имена игнорируются.
+ * @param {string[]} domains Целевые домены.
+ * @returns {Object[]} Ссылки на исходные cookies либо [] при неполной/неоднозначной паре.
+ */
 function selectSyncCookiePair(cookies, domains) {
     if (!Array.isArray(cookies)) {
         return [];
@@ -93,6 +133,14 @@ function selectSyncCookiePair(cookies, domains) {
     return selected;
 }
 
+/**
+ * Формирует подсказку по результатам HTTP/HTTPS-диагностики WebSocket-адреса.
+ * @param {string} url Настроенный ws:// или wss:// URL.
+ * @param {number|null} primaryStatus HTTP-код при соответствующей схеме, null при ошибке.
+ * @param {number|null} alternateStatus HTTP-код при противоположной схеме.
+ * @param {boolean} [timedOut=false] Был ли таймаут хотя бы одной пробы.
+ * @returns {string} Сообщение для пользователя, без утверждения точной причины TLS-ошибки.
+ */
 function describeConnectionFailure(url, primaryStatus, alternateStatus, timedOut = false) {
     let wsUrl;
     try {
@@ -128,6 +176,11 @@ function describeConnectionFailure(url, primaryStatus, alternateStatus, timedOut
     return `Не удалось установить соединение с ${url}. Проверьте, что сервер запущен с --no-tls, а адрес, порт и сеть доступны`;
 }
 
+/**
+ * Копирует переносимые поля cookie, исключая локальный storeId.
+ * Отсутствующая expirationDate остаётся отсутствующей для сохранения session-семантики.
+ * @returns {Object} Новый объект для серверной нагрузки.
+ */
 function pickCookieFields(cookie) {
     const fields = {
         name: cookie.name,
@@ -154,14 +207,20 @@ function pickCookieFields(cookie) {
     return fields;
 }
 
-// URL, на который ставится удалённая кука.
+/** Строит URL установки cookie по secure, domain (либо fallbackDomain) и path. */
 function buildCookieUrl(cookie, fallbackDomain) {
     const domain = normalizeDomain(cookie.domain || fallbackDomain);
     const scheme = cookie.secure ? 'https' : 'http';
     return `${scheme}://${domain}${cookie.path || '/'}`;
 }
 
-// Детали вызова browser.cookies.set (без зависимости от браузерного API).
+/**
+ * Готовит аргумент cookies.set, сохраняя hostOnly и время жизни cookie.
+ * @param {Object} cookie Переносимые поля удалённой cookie.
+ * @param {string} fallbackDomain Домен при отсутствии cookie.domain.
+ * @param {string} [storeId] Локальный целевой store; не берётся из серверной нагрузки.
+ * @returns {Object} Данные для браузерного API, без самого вызова API.
+ */
 function buildCookieSetDetails(cookie, fallbackDomain, storeId) {
     const details = {
         url: buildCookieUrl(cookie, fallbackDomain),
@@ -194,9 +253,12 @@ function buildCookieSetDetails(cookie, fallbackDomain, storeId) {
     return details;
 }
 
-// Защита от циклов синхронизации: помечаем куки, которые собираемся
-// выставлять локально; onChanged для них не должен вызывать повторный set.
-// Ключ нормализуется через cookieKey, поэтому .reso.ru и reso.ru совпадают.
+/**
+ * Помечает ожидаемую локальную установку удалённой cookie перед cookies.set.
+ * @param {Map} expected Изменяемая карта маркеров контекста.
+ * @param {Object} cookie Cookie с локальным storeId и ожидаемым значением.
+ * @param {number} [now=Date.now()] Время в миллисекундах для проверки TTL.
+ */
 function remarkExpectedRemoteChange(expected, cookie, now = Date.now()) {
     expected.set(cookieStoreKey(cookie), {
         at: now,
@@ -204,6 +266,18 @@ function remarkExpectedRemoteChange(expected, cookie, now = Date.now()) {
     });
 }
 
+/**
+ * Проверяет событие onChanged на соответствие ожидаемой удалённой записи.
+ * Удаление при overwrite подавляется без расходования маркера; совпавшая
+ * установка расходует его. Истёкшие маркеры удаляются, иные удаления не подавляются.
+ * @param {Map} expected Изменяемая карта маркеров.
+ * @param {Object} cookie Cookie события с локальным storeId.
+ * @param {number} ttlMs Время жизни маркера в миллисекундах.
+ * @param {number} [now=Date.now()] Текущее время в миллисекундах.
+ * @param {boolean} [removed=false] Признак удаления из события.
+ * @param {string} [cause=''] Причина изменения из события.
+ * @returns {boolean} Нужно ли подавить обратную отправку на сервер.
+ */
 function isExpectedRemoteChange(
     expected,
     cookie,

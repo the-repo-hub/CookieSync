@@ -1,3 +1,8 @@
+/**
+ * @file UI настроек контекста активной вкладки через runtime-сообщения background.
+ * Переключатель отражает подтверждённое состояние; сохранения выполняются по очереди,
+ * а версии действий и запросов защищают UI от запоздавших ответов статуса.
+ */
 const accountInput = document.getElementById('accountInput');
 const serverUrlInput = document.getElementById('serverUrlInput');
 const cookieDomainInput = document.getElementById('cookieDomainInput');
@@ -18,12 +23,14 @@ let statusDirty = false;
 
 const SETTINGS_FIELDS = [accountInput, serverUrlInput, cookieDomainInput];
 
+/** Разрешает или запрещает редактирование полей соединения и аккаунта. */
 function setFieldsDisabled(disabled) {
     SETTINGS_FIELDS.forEach(field => {
         field.disabled = disabled;
     });
 }
 
+/** Показывает ошибки полей и возвращает возможность сохранить текущую форму. */
 function validateInputs() {
     let isValid = boundContext !== null;
     accountError.textContent = '';
@@ -73,6 +80,7 @@ function validateInputs() {
     return isValid;
 }
 
+/** Разрешает включение только валидной формы, а выключение — любого включённого контекста. */
 function updateToggleState() {
     const isValid = validateInputs();
     const canToggle = boundContext !== null && (confirmedEnabled || isValid);
@@ -86,18 +94,21 @@ function updateToggleState() {
     }
 }
 
+/** Приводит checkbox и доступность полей к последнему подтверждённому состоянию. */
 function updateControls() {
     enableToggle.checked = confirmedEnabled;
     setFieldsDisabled(confirmedEnabled || toggleSaving);
     updateToggleState();
 }
 
+/** Принимает ответ background как подтверждение enabled и обновляет отображение. */
 function confirmStatus(status) {
     confirmedEnabled = status.settings.enabled === true;
     updateControls();
     updateStatusDisplay(status.connected, confirmedEnabled, status.phase, status.detail, status.error);
 }
 
+/** Запрашивает статус привязанного контекста, игнорируя устаревшие ответы и ошибки. */
 function refreshStatus() {
     if (!boundContext || toggleSaving) return Promise.resolve();
     const version = actionVersion;
@@ -112,6 +123,7 @@ function refreshStatus() {
     });
 }
 
+/** Возвращает пользовательское название фазы соединения. */
 function phaseLabel(phase) {
     switch (phase) {
         case 'connecting':
@@ -131,6 +143,10 @@ function phaseLabel(phase) {
     }
 }
 
+/**
+ * Отображает фазу/ошибку; для выключенного контекста очищает строку статуса.
+ * Параметр connected сохранён в интерфейсе, оформление определяется phase.
+ */
 function updateStatusDisplay(connected, enabled, phase, detail, error) {
     syncStatus.classList.remove('connected', 'disconnected', 'error', 'disabled', 'active');
 
@@ -154,6 +170,7 @@ function updateStatusDisplay(connected, enabled, phase, detail, error) {
     }
 }
 
+/** Привязывает popup к текущей активной вкладке и загружает её настройки из background. */
 async function loadSettings() {
     enableToggle.disabled = true;
     setFieldsDisabled(true);
@@ -173,11 +190,20 @@ async function loadSettings() {
     }
 }
 
+/** Выводит сообщение ошибки, сохраняя подтверждённое состояние переключателя. */
 function showError(error) {
     syncStatus.className = 'sync-status error';
     syncStatus.textContent = `Ошибка: ${error.message || error}`;
 }
 
+/**
+ * Ставит сохранение формы или переключение в очередь сообщений background.
+ * Выключение отправляет disableContext без новых настроек и без валидации полей.
+ * При отказе или потере ответа запрашивает фактическое состояние контекста.
+ * @param {boolean} [enabled=confirmedEnabled] Желаемое состояние синхронизации.
+ * @param {boolean} [isToggle=false] Признак действия переключателя, блокирующего UI.
+ * @returns {Promise|undefined} Очередь сохранения либо undefined при невалидной форме.
+ */
 function saveSettings(enabled = confirmedEnabled, isToggle = false) {
     if (toggleSaving && !isToggle) return saveQueue;
     const disabling = isToggle && !enabled;

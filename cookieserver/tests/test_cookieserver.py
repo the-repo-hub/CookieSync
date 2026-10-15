@@ -1,4 +1,4 @@
-"""Test module for CookieServer."""
+"""Проверки протокола, конкуренции и CLI с временными аккаунтами и TLS-ключами."""
 import asyncio
 import json
 import logging
@@ -76,6 +76,7 @@ def cookies_not_sample():
 
 @pytest_asyncio.fixture
 async def server():
+    """Предоставляет TLS-сервер на свободном порту и останавливает его после теста."""
     server = Server(host=HOST, port=0)
     await server.start()
     try:
@@ -86,6 +87,7 @@ async def server():
 
 @pytest.fixture
 def server_url(server):
+    """Возвращает wss:// URL фактически выделенного серверу порта."""
     sock = server.server.sockets[0]
     port = sock.getsockname()[1]
     return f'wss://{HOST}:{port}'
@@ -93,6 +95,7 @@ def server_url(server):
 
 @pytest_asyncio.fixture
 async def plain_server():
+    """Предоставляет сервер без TLS на свободном порту с гарантированной остановкой."""
     server = Server(host=HOST, port=0, use_tls=False)
     await server.start()
     try:
@@ -103,6 +106,7 @@ async def plain_server():
 
 @pytest_asyncio.fixture
 async def async_client(server_url):
+    """Подключает основной тестовый клиент к TLS-серверу на время теста."""
     client = AsyncWSClient('async_client')
     await client.connect(server_url)
     yield client
@@ -111,6 +115,7 @@ async def async_client(server_url):
 
 @pytest_asyncio.fixture
 async def second_client(server_url):
+    """Предоставляет независимый сокет для проверки рассылки и конкуренции."""
     client = AsyncWSClient('second_client')
     await client.connect(server_url)
     yield client
@@ -119,6 +124,7 @@ async def second_client(server_url):
 
 @pytest_asyncio.fixture
 async def third_client(server_url):
+    """Предоставляет третий сокет для проверки рассылки нескольким получателям."""
     client = AsyncWSClient('third_client')
     await client.connect(server_url)
     yield client
@@ -127,6 +133,7 @@ async def third_client(server_url):
 
 @pytest.fixture
 def cookies_other():
+    """Возвращает альтернативную полную пару для проверки смены значения cookies."""
     with open(os.path.join(COOKIE_SERVER_PATH, "tests/test_cookie.json")) as f:
         cookies = json.loads(f.read())
     cookies[0]['value'] = "value_other"
@@ -135,20 +142,24 @@ def cookies_other():
 
 @pytest.fixture
 def not_storage_account():
+    """Имя отсутствующего аккаунта для проверки автоматического создания."""
     return 'test_to_create'
 
 
 @pytest.fixture
 def other_account():
+    """Имя второго аккаунта для проверки изоляции и повторной регистрации."""
     return 'other_account'
 
 
 @pytest.fixture
 def account():
+    """Имя основного аккаунта теста в изолированном хранилище."""
     return 'test_account'
 
 
 def register_payload(account):
+    """Создаёт запрос register без uuid, который добавляет AsyncWSClient."""
     return {
         Fields.command: Commands.register,
         Fields.account: account,
@@ -156,6 +167,7 @@ def register_payload(account):
 
 
 def set_payload(account, cookies):
+    """Создаёт запрос set с вложенной парой cookies; uuid добавляет AsyncWSClient."""
     return {
         Fields.command: Commands.set,
         Fields.account: account,
@@ -164,9 +176,10 @@ def set_payload(account, cookies):
 
 
 class TestCookieServer:
-    """Test class for CookieServer."""
+    """Регистрация, рассылка, cooldown, ошибки протокола и жизненный цикл сокетов."""
 
     async def wait_until(self, predicate, timeout=1, interval=0.01):
+        """Неблокирующе ждёт синхронный predicate; timeout и interval — в секундах."""
         start = asyncio.get_running_loop().time()
         while True:
             if predicate():
@@ -1031,6 +1044,7 @@ class TestManagementCommands:
 
     @pytest.fixture
     def manage_assets(self, tmp_path, monkeypatch):
+        """Выделяет отдельный каталог аккаунтов для вызовов management-команд."""
         accounts_dir = tmp_path / 'accounts'
         accounts_dir.mkdir()
         monkeypatch.setattr('cookieserver.src.storage.ACCOUNTS_PATH', str(accounts_dir))
@@ -1092,8 +1106,11 @@ class TestManagementCommands:
 
 
 class TestRefreshCookies:
+    """Compare-and-swap после входа: ревизии, cooldown, конкуренция и откат записи."""
+
     @staticmethod
     def request(account, cookies, revision):
+        """Создаёт refresh с ожидаемой ревизией; корреляционный UUID добавит клиент."""
         return {
             Fields.command: Commands.refresh, Fields.account: account,
             Fields.payload: cookies, Fields.expected_revision: revision,
@@ -1265,6 +1282,8 @@ class TestRefreshCookies:
 
 
 class TestAuditRegressions:
+    """Регрессии загрузки данных, регистрации и отмены фоновых файловых записей."""
+
     def test_list_accounts_never_rewrites_live_storage(self, temp_accounts_storage, cookies_not_sample, capsys):
         path = temp_accounts_storage / 'expired.json'
         document = json.dumps({

@@ -1,3 +1,9 @@
+"""Настройки из server_config.conf, читаемые при импорте, и настройка журнала.
+
+Отсутствующие параметры секции [server] получают значения по умолчанию.
+Относительные пути TLS разрешаются относительно рабочего каталога процесса.
+"""
+
 import configparser
 import logging
 import os
@@ -43,6 +49,7 @@ LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
 
 def configure_logging(level: str = LOG_LEVEL) -> None:
+    """Применяет basicConfig с общим форматом; неизвестный уровень заменяется INFO."""
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=LOG_FORMAT,

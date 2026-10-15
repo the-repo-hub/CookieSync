@@ -1,12 +1,21 @@
 'use strict';
 
+/** @file VM-тесты привязки popup к вкладке и подтверждённого сохранения настроек. */
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const vm = require('node:vm');
+/** Пропускает один оборот event loop для завершения загрузки UI через Promise. */
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+/**
+ * Загружает popup с поддельными DOM и runtime; прямое обращение к storage запрещено.
+ * @param {boolean} incognito Выбирает активную вкладку и её тестовый контекст.
+ * @param {boolean} [enabled=false] Начальное подтверждённое состояние синхронизации.
+ * @returns {Promise<Object>} DOM-элементы, запросы, слушатели и изменяемое состояние API.
+ */
 async function popup(incognito, enabled = false) {
     const elements = new Map();
     const requests = [];
@@ -14,6 +23,7 @@ async function popup(incognito, enabled = false) {
     const state = { activeTabId: incognito ? 9 : 7, fail: false,
         settings: { account: incognito ? 'account_B' : 'account_A',
             serverUrl: 'ws://mnas:52314', cookieDomains: ['.reso.ru'], enabled } };
+    /** Возвращает стабильную DOM-заглушку с классами и вручную вызываемыми событиями. */
     function element(id) {
         if (!elements.has(id)) {
             const classes = new Set();

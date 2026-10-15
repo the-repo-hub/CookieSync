@@ -1,5 +1,7 @@
 'use strict';
 
+/** @file Изолированные VM-тесты контекстов с управляемыми сокетами, API и таймерами. */
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
@@ -7,16 +9,19 @@ const { join } = require('node:path');
 const { randomUUID } = require('node:crypto');
 const vm = require('node:vm');
 
+/** Даёт Promise-продолжениям выполниться до следующего оборота event loop. */
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const pair = [
     { name: 'ASP.NET_SessionId', value: 'session-A', domain: '.reso.ru', path: '/' },
     { name: 'ResoOffice60', value: 'office-A', domain: '.reso.ru', path: '/' },
 ];
 const pairB = pair.map(cookie => ({ ...cookie, value: `${cookie.value}-B` }));
+/** Создаёт включённые настройки для заданного тестового аккаунта. */
 const config = account => ({ account, serverUrl: 'ws://mnas:52314', enabled: true, cookieDomains: ['.reso.ru'] });
 const normalTab = { id: 7, url: 'https://office.reso.ru/', incognito: false };
 const privateTab = { id: 9, url: 'https://office.reso.ru/', incognito: true };
 
+/** Создаёт событие WebExtension, чей emit ожидает Promise всех слушателей. */
 function event() {
     const listeners = [];
     return {
@@ -25,6 +30,13 @@ function event() {
     };
 }
 
+/**
+ * Загружает настоящий background и sync-context в VM с поддельным browser API.
+ * @param {Object} [options={}] Переопределения state: вкладки, stores, настройки,
+ * ошибки и Promise-барьеры; beforeReady вызывается до завершения bootstrap.
+ * @returns {Promise<Object>} Состояние, журналы вызовов и методы управления событиями.
+ * Таймеры не идут по реальному времени: тест явно вызывает fireTimer.
+ */
 async function background(options = {}) {
     const timers = new Map();
     const sockets = [];
@@ -117,6 +129,7 @@ async function background(options = {}) {
         };
     }
 
+    /** WebSocket-заглушка: тест явно открывает сокет и доставляет серверные сообщения. */
     class Socket {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -141,6 +154,7 @@ async function background(options = {}) {
     for (const file of ['logic.js', 'sync-context.js', 'background.js']) {
         vm.runInContext(readFileSync(join(__dirname, '..', file), 'utf8'), sandbox, { filename: file });
     }
+    /** Дожидается очередей менеджера и recovery, а также Promise-продолжений. */
     const settle = async () => {
         await flush(); await vm.runInContext('operations', sandbox);
         await vm.runInContext('recoveryWrites', sandbox); await flush();
@@ -151,9 +165,13 @@ async function background(options = {}) {
     }
     await vm.runInContext('ready', sandbox);
     await settle();
+    /** Возвращает экземпляр контекста из VM по локальному storeId. */
     const context = (id = '0') => vm.runInContext(`contexts.get(${JSON.stringify(id)})`, sandbox);
+    /** Доставляет runtime-сообщение с указанным sender, по умолчанию от popup. */
     const request = async (message, source = sender) => (await browser.runtime.onMessage.emit(message, source))[0];
+    /** Запрашивает снимок контекста так же, как привязанный к вкладке popup. */
     const view = (tabId = 7, contextId) => request({ type: 'getContext', tabId, contextId });
+    /** Посылает упорядоченное наблюдение DOM от верхнего фрейма office-вкладки. */
     const authState = async (tabId, loginVisible, extra = {}) => {
         state.authStateByTab ||= {};
         const previous = state.authStateByTab[tabId];
@@ -164,6 +182,7 @@ async function background(options = {}) {
             tab: state.tabs.find(tab => tab.id === tabId) });
         await settle();
     };
+    /** Сохраняет частичные настройки через публичный runtime-маршрут контекста. */
     const save = async (settings, tabId = 7) => {
         const current = await view(tabId);
         const response = await request({
@@ -172,6 +191,7 @@ async function background(options = {}) {
         await settle();
         return response;
     };
+    /** Открывает сокет store, отвечает на register с его UUID и ждёт обработки ответа. */
     async function register(payload = [], result = true, storeId = '0', revision = payload.length ? 1 : 0) {
         const socket = context(storeId).socket;
         assert.ok(socket, `Expected an enabled context for store ${storeId}`);
@@ -183,6 +203,7 @@ async function background(options = {}) {
         await settle();
         return socket;
     }
+    /** Выполняет первый таймер с заданной задержкой без ожидания реального времени. */
     async function fireTimer(delay) {
         const entry = [...timers].find(([, timer]) => timer.delay === delay);
         assert.ok(entry, `Expected a ${delay}ms timer`);

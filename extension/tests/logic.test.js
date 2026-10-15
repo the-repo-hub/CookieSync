@@ -1,5 +1,7 @@
 'use strict';
 
+/** @file Проверки чистых функций доменов, пары cookies, диагностики и подавления эха. */
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 

@@ -1,7 +1,10 @@
+"""Ожидаемые ошибки, сообщения которых сервер может вернуть клиенту."""
+
+
 class HandleCommandError(Exception):
-    """Command is missed, non-existing command, etc"""
+    """Некорректный запрос или неизвестная команда протокола."""
     pass
 
 class StorageError(Exception):
-    """Errors with accounts operations"""
+    """Нарушение условий работы с аккаунтом, регистрацией или парой cookies."""
     pass

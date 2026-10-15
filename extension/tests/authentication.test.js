@@ -1,5 +1,7 @@
 'use strict';
 
+/** @file Проверки DOM-вердикта входа, повторного внедрения и порядка наблюдений. */
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
@@ -9,6 +11,12 @@ const { randomUUID, webcrypto } = require('node:crypto');
 
 const source = readFileSync(join(__dirname, '../authentication.js'), 'utf8');
 
+/**
+ * Дважды внедряет content script в VM и проверяет единственность его слушателей.
+ * @param {boolean} [legacy=false] Имитирует маркер внедрения предыдущей версии.
+ * @param {boolean} [secure=true] Предоставляет randomUUID, как на HTTPS-странице.
+ * @returns {Object} Управляемый DOM, запросы и записанные события состояния входа.
+ */
 function authentication(legacy = false, secure = true) {
     const listeners = [];
     const messages = [];
@@ -34,6 +42,7 @@ function authentication(legacy = false, secure = true) {
     assert.equal(listeners.length, 1);
     assert.equal(observers.length, 1);
 
+    /** Вызывает обработчик запроса background и возвращает синхронный DOM-вердикт. */
     function query(type = 'cookiesyncCheckAuthState') {
         let reply;
         listeners[0]({ type }, {}, result => { reply = result; });

@@ -1,5 +1,7 @@
 'use strict';
 
+/** @file Проверки CSP: явный ws/wss и отсутствие разрешения удалённых скриптов. */
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
@@ -7,6 +9,7 @@ const { join } = require('node:path');
 
 const manifest = JSON.parse(readFileSync(join(__dirname, '../manifest.json'), 'utf8'));
 
+/** Проверяет наличие явной CSP и разбирает её в карту директива -> источники. */
 function extensionPolicy() {
     const policy = manifest.content_security_policy?.extension_pages;
     // Firefox's implicit MV3 policy includes upgrade-insecure-requests.

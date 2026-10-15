@@ -1,3 +1,5 @@
+"""Хранение аккаунтов, ревизий и регистраций клиентов в памяти и JSON-файлах."""
+
 import asyncio
 import contextvars
 import json
@@ -32,6 +34,20 @@ async def run_storage_write(
     The executor Future isn't an asyncio Task, so shutdown's task cancellation
     cannot cancel the completion signal while the underlying thread still runs.
     Every await is shielded, including after repeated caller cancellation.
+
+    Args:
+        operation: Synchronous write executed in a worker with copied contextvars.
+        on_success: Optional synchronous callback run on the event-loop thread
+            after a successful write, even when caller cancellation is pending.
+
+    Returns:
+        The operation's result, unless the caller was cancelled.
+
+    Raises:
+        asyncio.CancelledError: After the worker and success callback finish if
+            cancellation was requested. Takes precedence over a worker failure.
+        Exception: The worker's error when no caller cancellation is pending,
+            or an error from the success callback.
     """
     loop = asyncio.get_running_loop()
     worker = loop.run_in_executor(None, contextvars.copy_context().run, operation)
@@ -68,12 +84,15 @@ RESERVED_ACCOUNT_NAMES = {
 
 @dataclass(frozen=True)
 class CookieUpdateResult:
+    """Результат записи: принятие пары, изменение данных и cooldown в секундах."""
+
     accepted: bool
     changed: bool
     retry_after: int
 
 
 def is_finite_number(value: object) -> bool:
+    """Проверяет конечное int/float, исключая bool и слишком большие целые."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:
@@ -83,6 +102,7 @@ def is_finite_number(value: object) -> bool:
 
 
 def filter_sync_cookies(payload: object) -> List[Dict]:
+    """Выбирает словари с разрешёнными именами cookies без проверки их значений."""
     if not isinstance(payload, list):
         return []
     return [
@@ -93,6 +113,12 @@ def filter_sync_cookies(payload: object) -> List[Dict]:
 
 
 def require_complete_cookie_pair(payload: object) -> List[Dict]:
+    """Возвращает валидную пару cookies в порядке SYNC_COOKIE_ORDER.
+
+    Посторонние cookies отбрасываются. Неполная пара, дубликаты, неверные
+    типы полей и истёкшие cookies вызывают StorageError. Возвращаемые словари
+    принадлежат исходной нагрузке; функция их не изменяет.
+    """
     cookies = filter_sync_cookies(payload)
     names = [cookie.get('name') for cookie in cookies]
     if len(cookies) != len(SYNC_COOKIE_NAMES) or set(names) != SYNC_COOKIE_NAMES:
@@ -129,8 +155,14 @@ def require_complete_cookie_pair(payload: object) -> List[Dict]:
 
 
 class Account:
+    """Состояние аккаунта с монотонным cooldown и блокировкой async-операций.
+
+    Синхронные методы записи сами не захватывают lock. Во время работы сервера
+    вызывающая корутина удерживает его до завершения run_storage_write.
+    """
 
     def __init__(self, name, payload, updated_at=0.0, revision=0):
+        """Восстанавливает cooldown по времени Unix updated_at и принятой ревизии."""
         self.name = name
         self.payload = payload
         self.updated_at = updated_at
@@ -143,10 +175,19 @@ class Account:
         self.lock = asyncio.Lock()
 
     def retry_after(self) -> int:
+        """Возвращает оставшийся cooldown в секундах с округлением вверх."""
         remaining = self._locked_until - time.monotonic()
         return max(0, math.ceil(remaining))
 
     def set_payload(self, payload, expected_revision: Optional[int] = None) -> CookieUpdateResult:
+        """Синхронно сохраняет уже проверенную пару и увеличивает её ревизию.
+
+        expected_revision задаёт compare-and-swap: только совпадение разрешает
+        обойти cooldown. Без него действует обычный интервал обновлений.
+        Та же пара принимается без записи и продления интервала; конфликт
+        ревизий отклоняется даже для той же пары. При OSError состояние
+        в памяти откатывается. Вызывающий код обязан удерживать lock.
+        """
         if expected_revision is not None:
             if type(expected_revision) is not int or expected_revision < 0:
                 raise StorageError('expected_revision must be a non-negative integer')
@@ -191,6 +232,11 @@ class Account:
         )
 
     def write_file(self):
+        """Заменяет JSON-файл через временный файл в том же каталоге.
+
+        Блокирующий I/O: при работающем event loop вызывать через
+        run_storage_write, удерживая lock; каталог должен уже существовать.
+        """
         document = {
             'payload': self.payload,
             'updated_at': self.updated_at,
@@ -203,8 +249,14 @@ class Account:
 
 
 class AccountStorage:
+    """Реестр аккаунтов и двусторонний индекс подключённых WebSocket-клиентов."""
 
     def __init__(self, cleanup_on_load: bool = True):
+        """Синхронно загружает аккаунты, при cleanup_on_load исправляет их файлы.
+
+        Для просмотра хранилища работающего сервера используйте False,
+        чтобы загрузка не перезаписала данные, изменяемые другим процессом.
+        """
         self._accounts: Dict[str, Account] = {}
         self._creation_lock = asyncio.Lock()
         self.websockets_by_account: Dict[str, Set[ServerConnection]] = {}
@@ -212,6 +264,7 @@ class AccountStorage:
         self._load_accounts(cleanup=cleanup_on_load)
 
     def add_client(self, websocket: ServerConnection, account_name: str) -> None:
+        """Привязывает сокет к аккаунту, удаляя прежнюю привязку, если она была."""
         previous = self._ws_accounts.get(websocket)
         if previous is not None and previous != account_name:
             previous_set = self.websockets_by_account.get(previous)
@@ -221,6 +274,7 @@ class AccountStorage:
         self.websockets_by_account.setdefault(account_name, set()).add(websocket)
 
     def remove_client(self, websocket: ServerConnection) -> None:
+        """Идемпотентно удаляет сокет из обоих индексов при отключении."""
         account_name = self._ws_accounts.pop(websocket, None)
         if account_name is None:
             return
@@ -229,10 +283,16 @@ class AccountStorage:
             ws_set.discard(websocket)
 
     def require_registered_client(self, websocket: ServerConnection, account_name: str) -> None:
+        """Вызывает StorageError, если сокет не зарегистрирован в этом аккаунте."""
         if self._ws_accounts.get(websocket) != account_name:
             raise StorageError('Register in this account before updating cookies')
 
     def _load_accounts(self, cleanup: bool = True) -> None:
+        """Загружает JSON и старый формат списка cookies, пропуская битые файлы.
+
+        Некорректная или истёкшая пара очищается с сохранением последней
+        ревизии. cleanup разрешает записать нормализованные данные на диск.
+        """
         if not os.path.isdir(ACCOUNTS_PATH):
             logger.warning(
                 f"Accounts directory {ACCOUNTS_PATH} does not exist, starting empty"
@@ -297,18 +357,26 @@ class AccountStorage:
                     logger.warning(f"Could not clean account file {path}: {e}")
 
     def get_all_accounts(self) -> List[str]:
+        """Возвращает новый список имён загруженных аккаунтов без сортировки."""
         return list(self._accounts.keys())
 
     def get_account(self, account_name: str) -> Optional[Account]:
-        """non strict"""
+        """Возвращает аккаунт или None, если такого имени нет в памяти."""
         return self._accounts.get(account_name)
 
     def require_account(self, account_name: str) -> Account:
+        """Возвращает аккаунт либо вызывает StorageError для неизвестного имени."""
         if account := self.get_account(account_name):
             return account
         raise StorageError(f"Account {account_name} does not exist")
 
     async def get_or_create_account(self, account_name: str) -> Account:
+        """Атомарно возвращает существующий или сохраняет новый пустой аккаунт.
+
+        Новые имена проверяются на безопасность для файлов Linux и Windows.
+        Создание сериализуется общей блокировкой; публикация в памяти следует
+        только за успешной записью, в том числе при отмене ожидающей корутины.
+        """
         if not isinstance(account_name, str) or not account_name.strip():
             raise StorageError('Account name must be a non-empty string')
         if account := self.get_account(account_name):
@@ -330,6 +398,7 @@ class AccountStorage:
             account = Account(account_name, [])
             async with account.lock:
                 def publish(_result: None) -> None:
+                    """Публикует сохранённый аккаунт до передачи отложенной отмены."""
                     self._accounts[account_name] = account
 
                 await run_storage_write(partial(self._persist_new_account, account), on_success=publish)
@@ -338,6 +407,7 @@ class AccountStorage:
 
     @staticmethod
     def _persist_new_account(account: Account) -> None:
+        """Создаёт каталог и файл аккаунта, отказываясь заменять существующий путь."""
         os.makedirs(ACCOUNTS_PATH, exist_ok=True)
         if os.path.lexists(account.full_path):
             # Do not overwrite an unreadable file skipped at startup, or a
@@ -349,5 +419,10 @@ class AccountStorage:
         self, account_name: str, payload: List[Dict],
         *, expected_revision: Optional[int] = None,
     ) -> CookieUpdateResult:
+        """Проверяет пару и синхронно обновляет аккаунт под lock вызывающего кода.
+
+        expected_revision используется только обработчиком refresh; обычный
+        set не должен передавать это значение из клиентского запроса.
+        """
         account = self.require_account(account_name)
         return account.set_payload(require_complete_cookie_pair(payload), expected_revision)

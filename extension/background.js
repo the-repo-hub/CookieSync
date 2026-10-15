@@ -1,3 +1,9 @@
+/**
+ * @file Менеджер независимых CookieSyncContext и маршрутизация браузерных событий.
+ * Обычные настройки живут в storage.local, приватные и recovery — в storage.session.
+ * Связи вкладок публикуются до async-записи, чтобы закрытие вкладки сразу завершало
+ * приватный контекст, в том числе при восстановлении MV3 worker.
+ */
 if (typeof importScripts === 'function') {
     importScripts('browser-polyfill.min.js', 'logic.js', 'sync-context.js');
 }
@@ -14,12 +20,18 @@ let legacySettings = null;
 let operations = Promise.resolve();
 let tabsVersion = 0;
 
+/**
+ * Сериализует операции менеджера, сохраняя работоспособность очереди после ошибки.
+ * @param {Function} operation Операция, возвращающая значение или Promise.
+ * @returns {Promise} Результат именно этой операции, включая её возможный отказ.
+ */
 function enqueue(operation) {
     const next = operations.then(operation);
     operations = next.catch(error => console.warn('[CookieSync] Context operation failed:', error));
     return next;
 }
 
+/** Посылает UI только идентификаторы изменившегося контекста, без его настроек. */
 function notify(context) {
     // Only routing metadata is broadcast; account settings stay in their context.
     browser.runtime.sendMessage({
@@ -27,6 +39,7 @@ function notify(context) {
     }).catch(() => {});
 }
 
+/** Ставит глубокий снимок recovery в очередь session-записей в исходном порядке. */
 function saveRecoverySessions() {
     const snapshot = structuredClone(recoverySessions);
     const next = recoveryWrites.then(async () => {
@@ -36,6 +49,7 @@ function saveRecoverySessions() {
     return next;
 }
 
+/** Сохраняет наблюдения входа, только если экземпляр всё ещё принадлежит менеджеру. */
 function recoveryChanged(context) {
     if (contexts.get(context.storeId) !== context) return Promise.resolve();
     const record = context.snapshotRecovery();
@@ -44,6 +58,11 @@ function recoveryChanged(context) {
     return saveRecoverySessions();
 }
 
+/**
+ * Немедленно удаляет контекст и его session-метаданные из состояния менеджера.
+ * Очередь уже начатых cookie-записей помещается в retired: новый контекст с тем же
+ * storeId должен дождаться её окончания перед использованием хранилища.
+ */
 function retire(storeId) {
     const context = contexts.get(storeId);
     if (!context) return;
@@ -59,6 +78,7 @@ function retire(storeId) {
     done.finally(() => { if (retired.get(storeId) === done) retired.delete(storeId); });
 }
 
+/** Сохраняет приватные настройки только в RAM-backed storage.session, если доступен. */
 async function savePrivateSessions() {
     // storage.session is RAM-only and survives MV3 worker recreation, not a
     // browser restart. Never put private settings in storage.local/sync.
@@ -67,6 +87,7 @@ async function savePrivateSessions() {
     }
 }
 
+/** Включает alarm каждые 0.5 минуты, пока хотя бы один контекст включён. */
 async function updateKeepalive() {
     if ([...contexts.values()].some(context => context.settings.enabled)) {
         await browser.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
@@ -75,12 +96,19 @@ async function updateKeepalive() {
     }
 }
 
+/** Повторяет сверку stores/вкладок, пока события вкладок не перестанут менять снимок. */
 async function reconcile() {
     // Tab events update live state immediately while API calls are pending.
     // Retry any snapshot invalidated by those events instead of overwriting them.
     while (!await reconcileSnapshot()) { /* Retry with a fresh browser snapshot. */ }
 }
 
+/**
+ * Создаёт, восстанавливает и удаляет контексты по одному снимку браузерных API.
+ * Миграция старых настроек допускается только в default store. Приватное состояние
+ * восстанавливается лишь при пересечении с вкладками прежнего времени жизни.
+ * @returns {Promise<boolean>} false означает устаревший снимок и необходимость повтора.
+ */
 async function reconcileSnapshot() {
     const version = tabsVersion;
     const [stores, tabs] = await Promise.all([browser.cookies.getAllCookieStores(), browser.tabs.query({})]);
@@ -173,6 +201,12 @@ const ready = enqueue(async () => {
     await reconcile();
 });
 
+/**
+ * Находит контекст вкладки popup и проверяет его идентичность и приватность.
+ * @param {Object} request Сообщение с tabId и, после привязки popup, contextId.
+ * @returns {Promise<CookieSyncContext>} Живой контекст указанной вкладки.
+ * @throws {Error} Если вкладка/контекст закрыты или изменились.
+ */
 async function contextForRequest(request) {
     if (!Number.isInteger(request.tabId)) throw new Error('Не удалось определить вкладку текущего контекста');
     const tab = await browser.tabs.get(request.tabId);

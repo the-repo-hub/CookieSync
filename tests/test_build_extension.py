@@ -1,3 +1,5 @@
+"""Проверки состава и воспроизводимости release-архивов во временном каталоге."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -10,7 +12,10 @@ import build_extension
 
 
 class ExtensionReleaseTests(unittest.TestCase):
+    """Целостность ресурсов и браузерные различия неподписанных release-пакетов."""
+
     def test_release_packages_are_complete_reproducible_and_browser_specific(self):
+        """Проверяет ссылки манифеста, PNG, стабильность ZIP и соответствие SHA256SUMS."""
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             paths = build_extension.build(release=True, output=output)
