@@ -70,7 +70,7 @@ class ListAccountsCommand(BaseCommand):
     help = "List existing accounts"
 
     def handle(self, args: argparse.Namespace) -> None:
-        storage = AccountStorage()
+        storage = AccountStorage(cleanup_on_load=False)
         accounts = storage.get_all_accounts()
         if not accounts:
             print("No accounts")

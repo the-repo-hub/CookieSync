@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,8 @@ import pytest_asyncio
 
 from cookieserver.manage import RunServerCommand, build_parser
 from cookieserver.src.choices import Commands, Fields
+from cookieserver.src.commands import SetCookiesCommand
+from cookieserver.src.request import Request
 from cookieserver.src.server import Server
 from cookieserver.src.settings import (
     ACCOUNTS_PATH,
@@ -25,23 +28,27 @@ HOST = '127.0.0.1'
 
 
 @pytest.fixture(scope='session', autouse=True)
-def asset_dirs():
-    """Предусловия для тестов: каталоги хранилища и TLS-сертификат."""
-    os.makedirs(ACCOUNTS_PATH, exist_ok=True)
-    os.makedirs(KEYS_PATH, exist_ok=True)
-
-    cert_path = os.path.join(KEYS_PATH, 'cert.pem')
-    key_path = os.path.join(KEYS_PATH, 'key.pem')
-    if not (os.path.exists(cert_path) and os.path.exists(key_path)):
-        subprocess.run(
-            [
-                'openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
-                '-keyout', key_path, '-x509', '-days', '365',
-                '-out', cert_path, '-subj', '/CN=localhost',
-            ],
-            check=True,
-            capture_output=True,
-        )
+def asset_dirs(tmp_path_factory):
+    """Тестовые сертификаты не должны создавать или заменять рабочие TLS-ключи."""
+    keys_path = tmp_path_factory.mktemp('tls_keys')
+    cert_path = str(keys_path / 'cert.pem')
+    key_path = str(keys_path / 'key.pem')
+    subprocess.run(
+        [
+            'openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
+            '-keyout', key_path, '-x509', '-days', '1',
+            '-out', cert_path, '-subj', '/CN=localhost',
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.MonkeyPatch.context() as mpatch:
+        mpatch.setattr('cookieserver.src.server.CERT_PATH', cert_path)
+        mpatch.setattr('cookieserver.src.server.KEY_PATH', key_path)
+        mpatch.setattr('cookieserver.manage.CERT_PATH', cert_path)
+        mpatch.setattr('cookieserver.manage.KEY_PATH', key_path)
+        mpatch.setattr('cookieserver.tests.test_cookieserver.KEYS_PATH', str(keys_path))
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -930,7 +937,7 @@ class TestCookieServer:
 
         assert account.payload == []
         assert account.updated_at == 0.0
-        assert account.revision == 0
+        assert account.revision == 12
         assert account.retry_after() == 0
 
     @pytest.mark.asyncio
@@ -1244,3 +1251,199 @@ class TestRefreshCookies:
             account_obj.lock.release()
         response = await asyncio.wait_for(request, timeout=1)
         assert response[Fields.accepted] is True
+
+
+class TestAuditRegressions:
+    def test_list_accounts_never_rewrites_live_storage(self, temp_accounts_storage, cookies_not_sample, capsys):
+        path = temp_accounts_storage / 'expired.json'
+        document = json.dumps({
+            'payload': [dict(cookie, expirationDate=1) for cookie in cookies_not_sample],
+            'updated_at': 1, 'revision': 17,
+        })
+        path.write_text(document)
+        args = build_parser().parse_args(['list_accounts'])
+        args.handler(args)
+        assert 'expired' in capsys.readouterr().out
+        assert path.read_text() == document
+
+    @pytest.mark.asyncio
+    async def test_expiry_cleanup_never_reuses_a_revision(
+        self, server, async_client, second_client, temp_accounts_storage, cookies_not_sample, cookies_other,
+    ):
+        path = temp_accounts_storage / 'expired.json'
+        path.write_text(json.dumps({
+            'payload': [dict(cookie, expirationDate=1) for cookie in cookies_not_sample],
+            'updated_at': 1, 'revision': 1,
+        }))
+        server.storage = AccountStorage()
+        account = server.storage.require_account('expired')
+        assert account.payload == []
+        assert account.revision == 1
+        assert account.retry_after() == 0
+        assert json.loads(path.read_text())['revision'] == 1
+        assert AccountStorage().require_account('expired').revision == 1
+
+        await async_client.send_request(register_payload('expired'))
+        winner = await async_client.send_request(set_payload('expired', cookies_other))
+        assert winner[Fields.accepted] is True
+        assert winner[Fields.revision] == 2
+        await second_client.send_request(register_payload('expired'))
+        stale = await second_client.send_request(TestRefreshCookies.request('expired', cookies_not_sample, 1))
+        assert stale[Fields.result] is True
+        assert stale[Fields.accepted] is False
+        assert stale[Fields.uuid] == second_client.last_request_uuid
+        assert stale[Fields.revision] == 2
+        assert stale[Fields.payload] == cookies_other
+        assert AccountStorage().require_account('expired').payload == cookies_other
+
+    @pytest.mark.parametrize('field,value', [('sameSite', []), ('sameSite', {}), ('name', []), ('expirationDate', 10 ** 1000)])
+    def test_malformed_cookie_types_do_not_prevent_loading_other_accounts(
+        self, temp_accounts_storage, cookies_not_sample, field, value,
+    ):
+        malformed = [dict(cookie) for cookie in cookies_not_sample]
+        malformed[0][field] = value
+        (temp_accounts_storage / 'bad.json').write_text(json.dumps({
+            'payload': malformed, 'updated_at': 0, 'revision': 7,
+        }))
+        (temp_accounts_storage / 'healthy.json').write_text(json.dumps({
+            'payload': cookies_not_sample, 'updated_at': 0, 'revision': 4,
+        }))
+        loaded = AccountStorage()
+        assert loaded.require_account('bad').payload == []
+        assert loaded.require_account('bad').revision == 7
+        assert loaded.require_account('healthy').payload == cookies_not_sample
+        assert loaded.require_account('healthy').revision == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('field,value', [('sameSite', []), ('name', {}), ('expirationDate', 10 ** 1000)])
+    async def test_malformed_cookie_types_are_protocol_errors(
+        self, server, account, async_client, cookies_not_sample, field, value,
+    ):
+        await async_client.send_request(register_payload(account))
+        malformed = [dict(cookie) for cookie in cookies_not_sample]
+        malformed[0][field] = value
+        response = await async_client.send_request(set_payload(account, malformed))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == async_client.last_request_uuid
+        assert response[Fields.message] != 'Internal server error'
+        assert server.storage.require_account(account).revision == 0
+
+    def test_unreadable_encoding_does_not_prevent_startup(self, temp_accounts_storage):
+        path = temp_accounts_storage / 'bad.json'
+        path.write_bytes(b'\xff\xfeinvalid')
+        (temp_accounts_storage / 'healthy.json').write_text('[]')
+        loaded = AccountStorage()
+        assert loaded.get_all_accounts() == ['healthy']
+        assert path.read_bytes() == b'\xff\xfeinvalid'
+
+    @pytest.mark.parametrize('revision', [-1, True, '7', None])
+    def test_invalid_revision_is_not_silently_reset(
+        self, temp_accounts_storage, cookies_not_sample, revision,
+    ):
+        path = temp_accounts_storage / 'bad.json'
+        original = json.dumps({'payload': cookies_not_sample, 'updated_at': 0, 'revision': revision})
+        path.write_text(original)
+        (temp_accounts_storage / 'healthy.json').write_text('[]')
+        loaded = AccountStorage()
+        assert loaded.get_account('bad') is None
+        assert loaded.get_account('healthy') is not None
+        assert path.read_text() == original
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('registered_elsewhere', [False, True])
+    async def test_set_requires_registration_in_its_target_account(
+        self, server, account, async_client, second_client, cookies_not_sample, registered_elsewhere,
+    ):
+        await async_client.send_request(register_payload(account))
+        if registered_elsewhere:
+            await second_client.send_request(register_payload('other_account'))
+        response = await second_client.send_request(set_payload(account, cookies_not_sample))
+        assert response[Fields.result] is False
+        assert response[Fields.uuid] == second_client.last_request_uuid
+        assert 'Register' in response[Fields.message]
+        assert Fields.payload not in response
+        assert server.storage.require_account(account).payload == []
+        legitimate = await async_client.send_request(set_payload(account, cookies_not_sample))
+        assert legitimate[Fields.accepted] is True
+
+    @pytest.mark.asyncio
+    async def test_disk_write_does_not_block_other_accounts(
+        self, server, account, async_client, second_client, cookies_not_sample,
+    ):
+        await async_client.send_request(register_payload(account))
+        account_obj: Account = server.storage.require_account(account)
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        original_write = account_obj.write_file
+
+        def delayed_write():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError('The event loop could not release the disk worker')
+            original_write()
+
+        with patch.object(account_obj, 'write_file', side_effect=delayed_write):
+            writing = asyncio.create_task(async_client.send_request(set_payload(account, cookies_not_sample)))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=3)
+                registered = await second_client.send_request(register_payload('independent_account'))
+                assert registered[Fields.result] is True
+                response = await second_client.send_request(set_payload('independent_account', cookies_not_sample))
+                assert response[Fields.accepted] is True
+                assert not writing.done()
+            finally:
+                release.set()
+                result = await writing
+        assert result[Fields.accepted] is True
+
+    @pytest.mark.asyncio
+    async def test_cancellation_keeps_account_locked_until_disk_write_finishes(
+        self, server, account, async_client, cookies_not_sample,
+    ):
+        await async_client.send_request(register_payload(account))
+        account_obj: Account = server.storage.require_account(account)
+        websocket = next(iter(server.storage.websockets_by_account[account]))
+        started = asyncio.Event()
+        attempted = asyncio.Event()
+        acquired = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        original_write = account_obj.write_file
+
+        class ObservedLock(asyncio.Lock):
+            async def acquire(self):
+                if self.locked():
+                    attempted.set()
+                return await super().acquire()
+
+        account_obj.lock = ObservedLock()
+
+        def delayed_write():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError('The event loop could not release the disk worker')
+            original_write()
+
+        async def follow():
+            async with account_obj.lock:
+                acquired.set()
+
+        with patch.object(account_obj, 'write_file', side_effect=delayed_write):
+            request = Request({**set_payload(account, cookies_not_sample), Fields.uuid: 'cancelled-write'})
+            writing = asyncio.create_task(SetCookiesCommand().execute(server.storage, request, websocket))
+            follower = None
+            try:
+                await asyncio.wait_for(started.wait(), timeout=3)
+                writing.cancel()
+                follower = asyncio.create_task(follow())
+                await asyncio.wait_for(attempted.wait(), timeout=3)
+                assert not acquired.is_set()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await writing
+                if follower:
+                    await follower
+        assert acquired.is_set()
+        assert AccountStorage().require_account(account).payload == cookies_not_sample

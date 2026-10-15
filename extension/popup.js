@@ -10,6 +10,11 @@ const syncStatus = document.getElementById('syncStatus');
 let boundContext = null;
 let boundTabId = null;
 let saveQueue = Promise.resolve();
+let confirmedEnabled = false;
+let toggleSaving = false;
+let actionVersion = 0;
+let statusRequest = 0;
+let statusDirty = false;
 
 const SETTINGS_FIELDS = [accountInput, serverUrlInput, cookieDomainInput];
 
@@ -71,14 +76,39 @@ function validateInputs() {
 function updateToggleState() {
     const isValid = validateInputs();
 
-    enableToggle.disabled = !isValid;
+    enableToggle.disabled = toggleSaving || !isValid;
 
-    if (isValid) {
+    if (isValid && !toggleSaving) {
         toggleContainer.classList.remove('disabled');
     } else {
         toggleContainer.classList.add('disabled');
-        enableToggle.checked = false;
     }
+}
+
+function updateControls() {
+    enableToggle.checked = confirmedEnabled;
+    setFieldsDisabled(confirmedEnabled || toggleSaving);
+    updateToggleState();
+}
+
+function confirmStatus(status) {
+    confirmedEnabled = status.settings.enabled === true;
+    updateControls();
+    updateStatusDisplay(status.connected, confirmedEnabled, status.phase, status.detail, status.error);
+}
+
+function refreshStatus() {
+    if (!boundContext || toggleSaving) return Promise.resolve();
+    const version = actionVersion;
+    const requestId = ++statusRequest;
+    const isCurrent = () => version === actionVersion && requestId === statusRequest && !toggleSaving;
+    return browser.runtime.sendMessage({
+        type: 'getContext', tabId: boundTabId, contextId: boundContext.contextId,
+    }).then(status => {
+        if (isCurrent()) confirmStatus(status);
+    }).catch(error => {
+        if (isCurrent()) showError(error);
+    });
 }
 
 function phaseLabel(phase) {
@@ -136,10 +166,7 @@ async function loadSettings() {
         accountInput.value = settings.account;
         serverUrlInput.value = settings.serverUrl;
         cookieDomainInput.value = settings.cookieDomains.join(', ');
-        enableToggle.checked = settings.enabled;
-        updateToggleState();
-        setFieldsDisabled(enableToggle.checked);
-        updateStatusDisplay(status.connected, settings.enabled, status.phase, status.detail, status.error);
+        confirmStatus(status);
     } catch (error) {
         showError(error);
     }
@@ -150,8 +177,10 @@ function showError(error) {
     syncStatus.textContent = `Ошибка: ${error.message || error}`;
 }
 
-function saveSettings() {
+function saveSettings(enabled = confirmedEnabled, isToggle = false) {
+    if (toggleSaving && !isToggle) return saveQueue;
     if (!validateInputs()) {
+        updateControls();
         return;
     }
 
@@ -164,15 +193,43 @@ function saveSettings() {
         account: accountInput.value.trim(),
         serverUrl: serverUrlInput.value.trim(),
         cookieDomains: domains.length ? domains : ['.reso.ru'],
-        enabled: enableToggle.checked
+        enabled,
     };
 
     const request = {
         type: 'saveSettings', tabId: boundTabId, contextId: boundContext.contextId, settings,
     };
+    actionVersion += 1;
+    if (isToggle) {
+        toggleSaving = true;
+        statusDirty = false;
+        updateControls();
+    }
     saveQueue = saveQueue.then(async () => {
-        const status = await browser.runtime.sendMessage(request);
-        updateStatusDisplay(status.connected, status.settings.enabled, status.phase, status.detail, status.error);
+        let failed = false;
+        try {
+            confirmStatus(await browser.runtime.sendMessage(request));
+        } catch (error) {
+            failed = true;
+            // A rejected save (or lost response) doesn't prove the background
+            // stopped. Query its actual state, otherwise keep the last confirmed one.
+            try {
+                confirmStatus(await browser.runtime.sendMessage({
+                    type: 'getContext', tabId: boundTabId, contextId: boundContext.contextId,
+                }));
+            } catch (statusError) {
+                console.warn('[CookieSync] Could not confirm settings after save failure:', statusError);
+            }
+            showError(error);
+        } finally {
+            const refresh = isToggle && statusDirty && !failed;
+            if (isToggle) {
+                toggleSaving = false;
+                statusDirty = false;
+            }
+            updateControls();
+            if (refresh) await refreshStatus();
+        }
     }).catch(showError);
     return saveQueue;
 }
@@ -182,17 +239,18 @@ accountInput.addEventListener('input', updateToggleState);
 serverUrlInput.addEventListener('input', updateToggleState);
 cookieDomainInput.addEventListener('input', updateToggleState);
 
-accountInput.addEventListener('blur', saveSettings);
-serverUrlInput.addEventListener('blur', saveSettings);
-cookieDomainInput.addEventListener('blur', saveSettings);
+accountInput.addEventListener('blur', () => saveSettings());
+serverUrlInput.addEventListener('blur', () => saveSettings());
+cookieDomainInput.addEventListener('blur', () => saveSettings());
 
 enableToggle.addEventListener('change', function () {
+    const requestedEnabled = this.checked;
+    this.checked = confirmedEnabled;
     if (!validateInputs()) {
-        this.checked = false;
+        updateControls();
         return;
     }
-    saveSettings();
-    setFieldsDisabled(this.checked);
+    return saveSettings(requestedEnabled, true);
 });
 
 toggleContainer.addEventListener('click', function (e) {
@@ -206,11 +264,11 @@ toggleContainer.addEventListener('click', function (e) {
 // Listen for status updates from background
 browser.runtime.onMessage.addListener((message) => {
     if (message.type === 'statusUpdate' && boundContext && message.contextId === boundContext.contextId) {
-        browser.runtime.sendMessage({
-            type: 'getContext', tabId: boundTabId, contextId: boundContext.contextId,
-        }).then(status => {
-            updateStatusDisplay(status.connected, status.settings.enabled, status.phase, status.detail, status.error);
-        }).catch(showError);
+        if (toggleSaving) {
+            statusDirty = true;
+            return;
+        }
+        refreshStatus();
     }
 });
 

@@ -1,14 +1,18 @@
 [Unit]
-Description=Cookie dispatch server
+Description=CookieSync WebSocket Server
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt
-ExecStart=/usr/bin/python3 -m cookieserver.start
-Restart=always
+User=cookiesync
+Group=cookiesync
+WorkingDirectory=/opt/CookieSync
+ExecStart=/opt/CookieSync/.venv/bin/python -m cookieserver.manage runserver
+Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

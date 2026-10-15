@@ -12,6 +12,7 @@ let recoverySessions = {};
 let recoveryWrites = Promise.resolve();
 let legacySettings = null;
 let operations = Promise.resolve();
+let tabsVersion = 0;
 
 function enqueue(operation) {
     const next = operations.then(operation);
@@ -72,18 +73,27 @@ async function updateKeepalive() {
 }
 
 async function reconcile() {
+    // Tab events update live state immediately while API calls are pending.
+    // Retry any snapshot invalidated by those events instead of overwriting them.
+    while (!await reconcileSnapshot()) { /* Retry with a fresh browser snapshot. */ }
+}
+
+async function reconcileSnapshot() {
+    const version = tabsVersion;
     const [stores, tabs] = await Promise.all([browser.cookies.getAllCookieStores(), browser.tabs.query({})]);
+    if (version !== tabsVersion) return false;
     const tabsById = new Map(tabs.map(tab => [tab.id, tab]));
     const active = new Set();
-    tabStores.clear();
+    const nextTabStores = new Map();
     for (const rawStore of stores) {
+        if (version !== tabsVersion) return false;
         const tabIds = rawStore.tabIds.filter(id => tabsById.has(id));
         const incognito = rawStore.incognito === true || rawStore.id === '1' || rawStore.id === 'firefox-private'
             || tabIds.some(id => tabsById.get(id).incognito === true);
         if (incognito && !tabIds.length) continue;
         const store = { id: rawStore.id, tabIds, incognito };
         active.add(store.id);
-        for (const id of tabIds) tabStores.set(id, store.id);
+        for (const id of tabIds) nextTabStores.set(id, store.id);
         let context = contexts.get(store.id);
         if (context && context.incognito && !tabIds.some(id => context.tabIds.has(id))) {
             retire(store.id);
@@ -93,6 +103,7 @@ async function reconcile() {
             // Don't let an already dispatched cookie operation from the previous
             // private lifetime overlap a newly created context with a reused ID.
             await retired.get(store.id);
+            if (version !== tabsVersion) return false;
             let settings = localSettings[store.id];
             let contextId;
             if (incognito) {
@@ -109,11 +120,13 @@ async function reconcile() {
                 localSettings[store.id] = settings;
                 await browser.storage.local.set({ contextSettings: localSettings, contextSettingsVersion: 1 });
                 legacySettings = null;
+                if (version !== tabsVersion) return false;
             }
             context = new CookieSyncContext(store, settings, notify, contextId, recoveryChanged);
             contexts.set(store.id, context);
             context.restoreRecovery(recoverySessions[store.id]);
             await recoveryChanged(context);
+            if (version !== tabsVersion) return false;
         }
         context.tabIds = new Set(tabIds);
         if (incognito) {
@@ -122,6 +135,9 @@ async function reconcile() {
             };
         }
     }
+    if (version !== tabsVersion) return false;
+    tabStores.clear();
+    for (const [tabId, storeId] of nextTabStores) tabStores.set(tabId, storeId);
     for (const id of contexts.keys()) {
         if (!active.has(id)) retire(id);
     }
@@ -134,6 +150,7 @@ async function reconcile() {
     await savePrivateSessions();
     await saveRecoverySessions();
     await updateKeepalive();
+    return version === tabsVersion;
 }
 
 const ready = enqueue(async () => {
@@ -214,6 +231,7 @@ browser.runtime.onMessage.addListener((request, sender) => {
 browser.cookies.onChanged.addListener(change => contexts.get(change.cookie.storeId)?.cookieChanged(change));
 
 browser.tabs.onCreated.addListener(tab => {
+    tabsVersion += 1;
     // Update live IDs immediately, before asynchronous enumeration, so closing
     // another tab cannot mistakenly dispose a still-open private context.
     const context = contexts.get(tab.cookieStoreId) || (tab.incognito
@@ -226,6 +244,7 @@ browser.tabs.onCreated.addListener(tab => {
 });
 
 browser.tabs.onRemoved.addListener(tabId => {
+    tabsVersion += 1;
     const storeId = tabStores.get(tabId);
     const context = contexts.get(storeId);
     tabStores.delete(tabId);

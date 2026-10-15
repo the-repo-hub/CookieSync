@@ -54,11 +54,20 @@ class SetCookiesCommand(Command):
     ) -> Dict:
         account = storage.require_account(request.account)
         async with account.lock:
-            if expected_revision is not None:
-                storage.require_registered_client(websocket, request.account)
-            update = storage.set_cookies(
-                request.account, request.payload, expected_revision=expected_revision,
+            storage.require_registered_client(websocket, request.account)
+            write_task = asyncio.create_task(
+                asyncio.to_thread(
+                    storage.set_cookies, request.account, request.payload,
+                    expected_revision=expected_revision,
+                )
             )
+            try:
+                update = await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                # Disk I/O cannot be cancelled. Keep account.lock held until the
+                # worker finishes, otherwise another update could race its write.
+                await write_task
+                raise
             output = {
                 Fields.command: Commands.set,
                 Fields.payload: account.payload,

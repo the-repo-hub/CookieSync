@@ -2,11 +2,13 @@
 .git
 /build/
 /.venv/
-/src/geckodriver.log
+geckodriver.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
 /.mypy_cache/
 /cookieserver/tests/.pytest_cache/
 /cookieserver/tests/geckodriver.log
 /.env
-/cookieserver/keys/key.pem
-/cookieserver/keys/cert.pem
+/cookieserver/keys/
 /cookieserver/accounts/*

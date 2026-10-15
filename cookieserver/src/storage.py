@@ -35,12 +35,22 @@ class CookieUpdateResult:
     retry_after: int
 
 
+def is_finite_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def filter_sync_cookies(payload: object) -> List[Dict]:
     if not isinstance(payload, list):
         return []
     return [
         cookie for cookie in payload
-        if isinstance(cookie, dict) and cookie.get('name') in SYNC_COOKIE_NAMES
+        if isinstance(cookie, dict) and isinstance(cookie.get('name'), str)
+        and cookie['name'] in SYNC_COOKIE_NAMES
     ]
 
 
@@ -62,16 +72,15 @@ def require_complete_cookie_pair(payload: object) -> List[Dict]:
         for field in ('secure', 'httpOnly', 'hostOnly'):
             if field in cookie and not isinstance(cookie[field], bool):
                 raise StorageError(f"Cookie {cookie['name']} has invalid {field}")
-        if 'sameSite' in cookie and cookie['sameSite'] not in {
-            'no_restriction', 'lax', 'strict', 'unspecified',
-        }:
+        if 'sameSite' in cookie and (
+            not isinstance(cookie['sameSite'], str)
+            or cookie['sameSite'] not in {'no_restriction', 'lax', 'strict', 'unspecified'}
+        ):
             raise StorageError(f"Cookie {cookie['name']} has invalid sameSite")
         if 'expirationDate' in cookie:
             expiration = cookie['expirationDate']
             if (
-                not isinstance(expiration, (int, float))
-                or isinstance(expiration, bool)
-                or not math.isfinite(expiration)
+                not is_finite_number(expiration)
                 or expiration <= time.time()
             ):
                 raise StorageError(
@@ -157,12 +166,12 @@ class Account:
 
 class AccountStorage:
 
-    def __init__(self):
+    def __init__(self, cleanup_on_load: bool = True):
         self._accounts: Dict[str, Account] = {}
         self._creation_lock = asyncio.Lock()
         self.websockets_by_account: Dict[str, Set[ServerConnection]] = {}
         self._ws_accounts: Dict[ServerConnection, str] = {}
-        self._load_accounts()
+        self._load_accounts(cleanup=cleanup_on_load)
 
     def add_client(self, websocket: ServerConnection, account_name: str) -> None:
         previous = self._ws_accounts.get(websocket)
@@ -183,9 +192,9 @@ class AccountStorage:
 
     def require_registered_client(self, websocket: ServerConnection, account_name: str) -> None:
         if self._ws_accounts.get(websocket) != account_name:
-            raise StorageError('Register in this account before refreshing cookies')
+            raise StorageError('Register in this account before updating cookies')
 
-    def _load_accounts(self) -> None:
+    def _load_accounts(self, cleanup: bool = True) -> None:
         if not os.path.isdir(ACCOUNTS_PATH):
             logger.warning(
                 f"Accounts directory {ACCOUNTS_PATH} does not exist, starting empty"
@@ -201,7 +210,7 @@ class AccountStorage:
             try:
                 with open(path, encoding=ENCODING) as file_obj:
                     document = json.load(file_obj)
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, UnicodeError, OSError) as e:
                 logger.warning(f"Skipping unreadable account file {path}: {e}")
                 continue
 
@@ -218,20 +227,21 @@ class AccountStorage:
                 filtered_payload = (
                     require_complete_cookie_pair(payload) if payload else []
                 )
-            except StorageError:
+            except StorageError as error:
+                logger.warning('Ignoring invalid cookies in %s: %s', path, error)
                 filtered_payload = []
             if (
-                not isinstance(updated_at, (int, float))
-                or isinstance(updated_at, bool)
-                or not math.isfinite(updated_at)
+                not is_finite_number(updated_at)
                 or updated_at < 0
             ):
                 updated_at = 0.0
             if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
-                revision = 0
+                logger.warning('Skipping account file with invalid revision: %s', path)
+                continue
             if not filtered_payload:
                 updated_at = 0.0
-                revision = 0
+                # Retain the last accepted revision even after cookie expiry.
+                # Reusing an old number would let a stale refresh replace a new pair.
             elif updated_at > time.time():
                 updated_at = time.time()
 
@@ -242,7 +252,7 @@ class AccountStorage:
                 'updated_at': float(updated_at),
                 'revision': revision,
             }
-            if document != expected_document:
+            if cleanup and document != expected_document:
                 try:
                     account.write_file()
                 except OSError as e:

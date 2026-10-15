@@ -734,3 +734,129 @@ test('login in another observed office tab of the same store uses that tab revis
     assert.equal(app.sent.at(-1).expected_revision, 5);
     assert.deepEqual(app.sent.at(-1).payload, pairB);
 });
+
+test('only one refresh can prepare cookies asynchronously for the same attempt', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true);
+    app.state.cookies = pairB;
+    await app.authState(7, false);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const originalRead = app.browser.cookies.getAll;
+    let reads = 0;
+    app.browser.cookies.getAll = async details => {
+        const cookies = await originalRead(details);
+        reads += 1;
+        await gate;
+        return cookies;
+    };
+    await app.fireTimer(1500);
+    assert.equal(app.context().recovery.inFlight, true);
+    await app.browser.cookies.onChanged.emit({ cookie: { ...pairB[0], storeId: '0' }, removed: false });
+    await app.fireTimer(1500);
+    assert.equal(reads, 1);
+    release(); await app.settle();
+    const refreshes = app.sent.filter(message => message.command === 'refresh');
+    assert.equal(refreshes.length, 1);
+    assert.equal(refreshes[0].expected_revision, 5);
+    await socket.message({ uuid: refreshes[0].uuid, result: true, accepted: true, payload: pairB, revision: 6 });
+    await app.settle();
+    assert.equal(app.timers.size, 0);
+});
+
+test('stale reconciliation cannot discard a newly opened private tab or reset its account', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    await app.register(pair);
+    await app.save(config('account_B'), 9);
+    const privateSocket = await app.register(pairB, true, '1');
+    const originalContextId = app.context('1').contextId;
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    const originalStores = app.browser.cookies.getAllCookieStores;
+    let first = true;
+    app.browser.cookies.getAllCookieStores = async () => {
+        const snapshot = await originalStores();
+        if (first) { first = false; entered(); await gate; }
+        return snapshot;
+    };
+    await app.browser.alarms.onAlarm.emit({ name: 'cookiesync-keepalive' });
+    await started;
+    const newTab = { ...privateTab, id: 10 };
+    app.state.tabs.push(newTab);
+    await app.browser.tabs.onCreated.emit(newTab);
+    assert.ok(app.context('1').tabIds.has(10));
+    const originalSave = app.browser.storage.session.set;
+    let closed = false;
+    app.browser.storage.session.set = async values => {
+        if (!closed && values.privateContexts?.['1']?.tabIds.includes(9)) {
+            closed = true;
+            app.state.tabs = app.state.tabs.filter(tab => tab.id !== 9);
+            await app.browser.tabs.onRemoved.emit(9);
+        }
+        return originalSave(values);
+    };
+    release(); await app.settle();
+    assert.equal(closed, true);
+    assert.equal(privateSocket.readyState, 1);
+    assert.equal(app.context('1').contextId, originalContextId);
+    assert.equal(app.context('1').settings.account, 'account_B');
+    assert.equal(app.context('1').settings.enabled, true);
+    assert.deepEqual(Array.from(app.context('1').tabIds), [10]);
+    assert.deepEqual(app.state.session.privateContexts['1'].tabIds, [10]);
+});
+
+test('private close is handled immediately while another context is being persisted', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    await app.register(pair);
+    await app.save(config('account_B'), 9);
+    const privateSocket = await app.register(pairB, true, '1');
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    const originalSave = app.browser.storage.session.set;
+    let first = true;
+    app.browser.storage.session.set = async values => {
+        if (first && values.reauthContexts) { first = false; entered(); await gate; }
+        return originalSave(values);
+    };
+    const container = { ...normalTab, id: 12, cookieStoreId: 'firefox-container-1' };
+    app.state.tabs.push(container);
+    app.state.stores = [
+        { id: '0', tabIds: [7] }, { id: 'firefox-container-1', tabIds: [12] }, { id: '1', tabIds: [9] },
+    ];
+    await app.browser.tabs.onCreated.emit(container);
+    await started;
+    app.state.tabs = app.state.tabs.filter(tab => tab.id !== 9);
+    await app.browser.tabs.onRemoved.emit(9);
+    assert.equal(privateSocket.readyState, 3);
+    release(); await app.settle();
+    assert.equal(app.context('1'), undefined);
+    assert.equal('1' in app.state.session.privateContexts, false);
+});
+
+test('an empty account after a refresh conflict is initialized via ordinary set, without rebasing refresh', async () => {
+    const app = await background();
+    const socket = await app.register(pair);
+    await app.authState(7, true);
+    app.state.cookies = pairB;
+    await app.authState(7, false);
+    await app.fireTimer(1500);
+    const refresh = app.sent.at(-1);
+    assert.equal(refresh.command, 'refresh');
+    await socket.message({ uuid: refresh.uuid, result: true, accepted: false, payload: [], revision: 4 });
+    await app.settle();
+    assert.equal(app.context().initialPending, true);
+    await app.fireTimer(1500);
+    const initialSet = app.sent.at(-1);
+    assert.equal(initialSet.command, 'set');
+    assert.equal('expected_revision' in initialSet, false);
+    assert.deepEqual(initialSet.payload, pairB);
+    // A peer can fill the empty account first. Its new pair remains authoritative.
+    await socket.message({ uuid: initialSet.uuid, result: true, accepted: false, payload: pair, revision: 5, retry_after: 300 });
+    await app.settle();
+    assert.equal(app.context().initialPending, false);
+    assert.equal(app.context().latestRevision, 5);
+    assert.equal(app.sent.filter(request => request.command === 'refresh').length, 1);
+});

@@ -117,6 +117,7 @@ websockets_by_account: dict[str, set[ServerConnection]]
 `set`:
 
 * validates account;
+* requires the websocket to be registered in that account;
 * acquires `account.lock`;
 * updates stored cookies;
 * broadcasts new cookies to other registered clients;
@@ -165,6 +166,11 @@ Each account has:
 ```python
 asyncio.Lock
 ```
+
+Cookie cleanup at startup must preserve the last valid accepted revision, even
+when the payload becomes empty. Never reuse revision numbers after expiry.
+Runtime file writes run outside the event loop; keep `account.lock` held until
+the write worker finishes, including when the request coroutine is cancelled.
 
 Critical account operations must use:
 
