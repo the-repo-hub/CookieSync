@@ -48,6 +48,9 @@ function retire(storeId) {
     const context = contexts.get(storeId);
     if (!context) return;
     contexts.delete(storeId);
+    for (const [tabId, owner] of tabStores) {
+        if (owner === storeId) tabStores.delete(tabId);
+    }
     delete privateSessions[storeId];
     delete recoverySessions[storeId];
     saveRecoverySessions().catch(error => console.warn('[CookieSync] Could not clear retired recovery:', error));
@@ -124,6 +127,9 @@ async function reconcileSnapshot() {
             }
             context = new CookieSyncContext(store, settings, notify, contextId, recoveryChanged);
             contexts.set(store.id, context);
+            // Lifecycle handlers must see a newly created context before the
+            // first persistence await, including during worker restoration.
+            for (const id of tabIds) tabStores.set(id, store.id);
             context.restoreRecovery(recoverySessions[store.id]);
             await recoveryChanged(context);
             if (version !== tabsVersion) return false;
@@ -199,14 +205,18 @@ browser.runtime.onMessage.addListener((request, sender) => {
             }
         });
     }
-    if (!['getContext', 'saveSettings'].includes(request?.type)) return;
+    if (!['getContext', 'saveSettings', 'disableContext'].includes(request?.type)) return;
     if (sender.id !== browser.runtime.id || sender.url !== browser.runtime.getURL('popup.html')) return;
     return enqueue(async () => {
         await reconcile();
         const context = await contextForRequest(request);
-        if (request.type === 'saveSettings') {
+        if (request.type === 'saveSettings' || request.type === 'disableContext') {
             if (!request.contextId) throw new Error('Не указан идентификатор контекста');
-            const settings = validateSyncSettings(request.settings);
+            // Stopping an existing context must work even if its saved URL is
+            // invalid. This operation cannot change any connection settings.
+            const settings = request.type === 'disableContext'
+                ? { ...context.settings, enabled: false }
+                : validateSyncSettings(request.settings);
             if (context.incognito) {
                 privateSessions[context.storeId] = {
                     settings, contextId: context.contextId, tabIds: [...context.tabIds],

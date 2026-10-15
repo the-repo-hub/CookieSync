@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 import math
@@ -6,7 +7,8 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from functools import partial
+from typing import Callable, Dict, List, Optional, Set, TypeVar
 
 from websockets.asyncio.server import ServerConnection
 
@@ -18,6 +20,42 @@ from cookieserver.src.settings import (
 )
 
 logger = logging.getLogger(__name__)
+_WriteResult = TypeVar('_WriteResult')
+
+
+async def run_storage_write(
+    operation: Callable[[], _WriteResult],
+    on_success: Optional[Callable[[_WriteResult], None]] = None,
+) -> _WriteResult:
+    """Finish I/O before propagating cancellation; callers hold their locks.
+
+    The executor Future isn't an asyncio Task, so shutdown's task cancellation
+    cannot cancel the completion signal while the underlying thread still runs.
+    Every await is shielded, including after repeated caller cancellation.
+    """
+    loop = asyncio.get_running_loop()
+    worker = loop.run_in_executor(None, contextvars.copy_context().run, operation)
+    cancellation = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            cancellation = error
+        except Exception:
+            break  # Retrieve the worker exception below, after it has finished.
+    try:
+        result = worker.result()
+    except BaseException:
+        if cancellation is not None:
+            if not worker.cancelled():
+                logger.exception('Storage operation failed while cancellation was pending')
+            raise cancellation
+        raise
+    if on_success is not None:
+        on_success(result)
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 SYNC_COOKIE_ORDER = ('ASP.NET_SessionId', 'ResoOffice60')
 SYNC_COOKIE_NAMES = frozenset(SYNC_COOKIE_ORDER)
@@ -291,18 +329,10 @@ class AccountStorage:
                 return account
             account = Account(account_name, [])
             async with account.lock:
-                write_task = asyncio.create_task(
-                    asyncio.to_thread(self._persist_new_account, account)
-                )
-                try:
-                    await asyncio.shield(write_task)
-                except asyncio.CancelledError:
-                    # A filesystem write cannot be cancelled. Finish it before
-                    # releasing the creation lock so another client can reuse it.
-                    await write_task
+                def publish(_result: None) -> None:
                     self._accounts[account_name] = account
-                    raise
-                self._accounts[account_name] = account
+
+                await run_storage_write(partial(self._persist_new_account, account), on_success=publish)
             logger.info('Created account %s on registration', account_name)
             return account
 

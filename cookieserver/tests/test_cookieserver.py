@@ -21,7 +21,7 @@ from cookieserver.src.settings import (
     COOKIE_UPDATE_INTERVAL,
     KEYS_PATH,
 )
-from cookieserver.src.storage import Account, AccountStorage
+from cookieserver.src.storage import Account, AccountStorage, run_storage_write
 from cookieserver.tests.AsyncWSClient import AsyncWSClient
 
 HOST = '127.0.0.1'
@@ -366,23 +366,34 @@ class TestCookieServer:
         assert not server.storage.websockets_by_account
 
     @pytest.mark.asyncio
-    async def test_cancelled_creation_finishes_before_retry(self, server, monkeypatch):
+    @pytest.mark.parametrize('cancel_count', [1, 3])
+    async def test_cancelled_creation_finishes_before_retry(self, server, monkeypatch, cancel_count):
+        account_storage: AccountStorage = server.storage
         started = asyncio.Event()
-        release = asyncio.Event()
-        to_thread = asyncio.to_thread
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        persist = account_storage._persist_new_account
         writes = []
 
-        async def delayed_write(function, account_obj):
+        def delayed_write(account_obj):
             writes.append(account_obj)
-            started.set()
-            await release.wait()
-            return await to_thread(function, account_obj)
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError('The event loop could not release the disk worker')
+            persist(account_obj)
 
-        monkeypatch.setattr('cookieserver.src.storage.asyncio.to_thread', delayed_write)
+        monkeypatch.setattr(account_storage, '_persist_new_account', delayed_write)
         first = asyncio.create_task(server.storage.get_or_create_account('cancelled'))
         try:
             await asyncio.wait_for(started.wait(), timeout=1)
-            first.cancel()
+            for _ in range(cancel_count):
+                first.cancel()
+                turn = loop.create_future()
+                loop.call_soon(turn.set_result, None)
+                await turn
+                assert not first.done()
+                assert server.storage._creation_lock.locked()
+                assert writes[0].lock.locked()
             second = asyncio.create_task(server.storage.get_or_create_account('cancelled'))
         finally:
             release.set()
@@ -1398,8 +1409,9 @@ class TestAuditRegressions:
         assert result[Fields.accepted] is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize('cancel_count', [1, 3])
     async def test_cancellation_keeps_account_locked_until_disk_write_finishes(
-        self, server, account, async_client, cookies_not_sample,
+        self, server, account, async_client, cookies_not_sample, cancel_count,
     ):
         await async_client.send_request(register_payload(account))
         account_obj: Account = server.storage.require_account(account)
@@ -1435,7 +1447,13 @@ class TestAuditRegressions:
             follower = None
             try:
                 await asyncio.wait_for(started.wait(), timeout=3)
-                writing.cancel()
+                for _ in range(cancel_count):
+                    writing.cancel()
+                    turn = loop.create_future()
+                    loop.call_soon(turn.set_result, None)
+                    await turn
+                    assert not writing.done()
+                    assert account_obj.lock.locked()
                 follower = asyncio.create_task(follow())
                 await asyncio.wait_for(attempted.wait(), timeout=3)
                 assert not acquired.is_set()
@@ -1447,3 +1465,128 @@ class TestAuditRegressions:
                     await follower
         assert acquired.is_set()
         assert AccountStorage().require_account(account).payload == cookies_not_sample
+
+    @pytest.mark.asyncio
+    async def test_failed_write_after_repeated_cancel_rolls_back_and_preserves_cancellation(
+        self, server, account, async_client, cookies_not_sample, caplog,
+    ):
+        await async_client.send_request(register_payload(account))
+        account_obj: Account = server.storage.require_account(account)
+        websocket = next(iter(server.storage.websockets_by_account[account]))
+        started = asyncio.Event()
+        finished = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def failed_write():
+            loop.call_soon_threadsafe(started.set)
+            try:
+                if not release.wait(timeout=5):
+                    raise TimeoutError('The event loop could not release the disk worker')
+                raise OSError('disk full')
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        with patch.object(account_obj, 'write_file', side_effect=failed_write):
+            request = Request({**set_payload(account, cookies_not_sample), Fields.uuid: 'cancelled-failed-write'})
+            writing = asyncio.create_task(SetCookiesCommand().execute(server.storage, request, websocket))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=3)
+                for _ in range(3):
+                    writing.cancel()
+                    turn = loop.create_future()
+                    loop.call_soon(turn.set_result, None)
+                    await turn
+                    assert account_obj.lock.locked()
+                    assert not writing.done()
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await writing
+                await asyncio.wait_for(finished.wait(), timeout=3)
+        assert account_obj.payload == []
+        assert account_obj.revision == 0
+        assert not account_obj.lock.locked()
+        assert AccountStorage().require_account(account).payload == []
+        assert 'Storage operation failed while cancellation was pending' in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_failed_creation_after_repeated_cancel_is_not_published(self, server, monkeypatch, caplog):
+        account_storage: AccountStorage = server.storage
+        started = asyncio.Event()
+        finished = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        original = account_storage._persist_new_account
+
+        def failed_create(_account):
+            loop.call_soon_threadsafe(started.set)
+            try:
+                if not release.wait(timeout=5):
+                    raise TimeoutError('The event loop could not release the disk worker')
+                raise OSError('disk full')
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        monkeypatch.setattr(account_storage, '_persist_new_account', failed_create)
+        creating = asyncio.create_task(server.storage.get_or_create_account('cancelled_failure'))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            for _ in range(3):
+                creating.cancel()
+                turn = loop.create_future()
+                loop.call_soon(turn.set_result, None)
+                await turn
+                assert server.storage._creation_lock.locked()
+                assert not creating.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await creating
+            await asyncio.wait_for(finished.wait(), timeout=3)
+        assert server.storage.get_account('cancelled_failure') is None
+        assert not server.storage._creation_lock.locked()
+        assert 'Storage operation failed while cancellation was pending' in caplog.text
+        monkeypatch.setattr(account_storage, '_persist_new_account', original)
+        created = await server.storage.get_or_create_account('cancelled_failure')
+        assert created is server.storage.require_account('cancelled_failure')
+
+    @pytest.mark.asyncio
+    async def test_storage_completion_is_not_cancelled_by_a_task_shutdown_sweep(self):
+        loop = asyncio.get_running_loop()
+        before = asyncio.all_tasks()
+        started = asyncio.Event()
+        release = threading.Event()
+        lock = asyncio.Lock()
+        published = []
+
+        def work():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError('The event loop could not release the disk worker')
+            return 'committed'
+
+        async def write():
+            async with lock:
+                await run_storage_write(work, on_success=published.append)
+
+        writing = asyncio.create_task(write())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            tasks = asyncio.all_tasks() - before
+            # A separately cancellable to_thread Task would lose the completion
+            # signal during asyncio.run() shutdown even if its parent shields it.
+            assert tasks == {writing}
+            for task in tasks:
+                task.cancel()
+            turn = loop.create_future()
+            loop.call_soon(turn.set_result, None)
+            await turn
+            assert lock.locked()
+            assert not writing.done()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await writing
+        assert published == ['committed']
+        assert not lock.locked()

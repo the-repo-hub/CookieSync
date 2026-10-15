@@ -171,6 +171,10 @@ Cookie cleanup at startup must preserve the last valid accepted revision, even
 when the payload becomes empty. Never reuse revision numbers after expiry.
 Runtime file writes run outside the event loop; keep `account.lock` held until
 the write worker finishes, including when the request coroutine is cancelled.
+Use `run_storage_write` for these operations: protect every wait against repeated
+cancellation and keep the worker completion Future outside the cancellable Task set.
+Publish a newly created account only after a successful write, even if its caller
+was cancelled while waiting.
 
 Critical account operations must use:
 
@@ -606,6 +610,12 @@ Private settings belong only in RAM (`storage.session`), tied to live private ta
 Closing the last private tab disposes that context and clears its session settings;
 a new private lifetime must not inherit the old account or the regular account.
 Migrate legacy flat settings only into the regular/default cookie store.
+Publish new context/tab associations before awaiting persistence so tab removal
+during worker bootstrap can retire the context immediately.
+Reconnect must preserve a recovery's pinned revision without sharing its in-flight
+ownership with tasks from the old connection. Disabling a context must work even
+when its saved connection settings are invalid; never apply new settings through
+the internal disable-only operation.
 
 Expected lifecycle:
 

@@ -145,6 +145,10 @@ async function background(options = {}) {
         await flush(); await vm.runInContext('operations', sandbox);
         await vm.runInContext('recoveryWrites', sandbox); await flush();
     };
+    if (options.beforeReady) {
+        await options.beforeReady({ browser, state,
+            lookup: id => vm.runInContext(`contexts.get(${JSON.stringify(id)})`, sandbox) });
+    }
     await vm.runInContext('ready', sandbox);
     await settle();
     const context = (id = '0') => vm.runInContext(`contexts.get(${JSON.stringify(id)})`, sandbox);
@@ -860,3 +864,127 @@ test('an empty account after a refresh conflict is initialized via ordinary set,
     assert.equal(app.context().latestRevision, 5);
     assert.equal(app.sent.filter(request => request.command === 'refresh').length, 1);
 });
+
+for (const [normalId, privateId] of [['0', '1'], ['firefox-default', 'firefox-private']]) {
+    test(`closing the last private tab during worker bootstrap cannot revive its account (${privateId})`, async () => {
+        let oldSocket;
+        let paused = false;
+        const app = await background({
+            tabs: [normalTab, privateTab],
+            stores: [{ id: normalId, tabIds: [7] }, { id: privateId, tabIds: [9], incognito: true }],
+            local: { contextSettingsVersion: 1, contextSettings: { [normalId]: config('account_A') } },
+            session: { privateContexts: {
+                [privateId]: { settings: config('account_B'), tabIds: [9], contextId: 'old-private-lifetime' },
+            } },
+            beforeReady: async ({ browser, state, lookup }) => {
+                let release, entered;
+                const gate = new Promise(resolve => { release = resolve; });
+                const started = new Promise(resolve => { entered = resolve; });
+                const save = browser.storage.session.set;
+                browser.storage.session.set = async values => {
+                    if (!paused && values.reauthContexts && lookup(privateId)) {
+                        paused = true;
+                        oldSocket = lookup(privateId).socket;
+                        entered();
+                        await gate;
+                    }
+                    return save(values);
+                };
+                await started;
+                try {
+                    state.tabs = [normalTab];
+                    await browser.tabs.onRemoved.emit(9);
+                    assert.equal(oldSocket.readyState, 3);
+                    const fresh = { ...privateTab, id: 10, cookieStoreId: privateId };
+                    state.tabs.push(fresh);
+                    state.stores[1] = { id: privateId, tabIds: [10], incognito: true };
+                    await browser.tabs.onCreated.emit(fresh);
+                } finally {
+                    release();
+                }
+            },
+        });
+        const fresh = app.context(privateId);
+        assert.equal(fresh.settings.account, '');
+        assert.equal(fresh.settings.enabled, false);
+        assert.notEqual(fresh.contextId, 'old-private-lifetime');
+        assert.equal(fresh.socket, null);
+        await oldSocket.message({ command: 'set', payload: pairB, revision: 99 });
+        await app.register(pair, true, normalId);
+        assert.ok(app.written.every(cookie => cookie.storeId === normalId));
+        assert.equal(app.state.session.privateContexts[privateId].settings.account, '');
+    });
+}
+
+test('an old cookie read cannot release a refresh owned by the replacement connection', async () => {
+    const app = await background();
+    const oldSocket = await app.register(pair, true, '0', 5);
+    await app.authState(7, true);
+    app.state.cookies = pairB;
+    await app.authState(7, false);
+    let releaseOld, releaseNew;
+    const oldGate = new Promise(resolve => { releaseOld = resolve; });
+    const newGate = new Promise(resolve => { releaseNew = resolve; });
+    const read = app.browser.cookies.getAll;
+    let reads = 0;
+    app.browser.cookies.getAll = async details => {
+        const cookies = await read(details);
+        const index = ++reads;
+        if (index === 1) await oldGate;
+        if (index === 2) await newGate;
+        return cookies;
+    };
+    await app.fireTimer(1500);
+    const oldRecovery = app.context().recovery;
+    await oldSocket.close(); await app.settle();
+    await app.fireTimer(5000);
+    const replacement = await app.register(pair, true, '0', 5);
+    assert.notEqual(app.context().recovery, oldRecovery);
+    await app.fireTimer(1500);
+    assert.equal(reads, 2);
+    assert.equal(app.context().recovery.inFlight, true);
+    releaseOld(); await app.settle();
+    assert.equal(app.context().recovery.inFlight, true);
+    await app.browser.cookies.onChanged.emit({ cookie: { ...pairB[0], storeId: '0' }, removed: false });
+    await app.fireTimer(1500);
+    assert.equal(reads, 2);
+    releaseNew(); await app.settle();
+    const refreshes = replacement.sent.filter(request => request.command === 'refresh');
+    assert.equal(refreshes.length, 1);
+    assert.equal(refreshes[0].expected_revision, 5);
+    await replacement.message({ uuid: refreshes[0].uuid, result: true, accepted: true, payload: pairB, revision: 6 });
+    await app.settle();
+    assert.equal(app.context().recovery, null);
+    assert.equal(app.timers.size, 0);
+});
+
+for (const privateContext of [false, true]) {
+    test(`an invalid enabled configuration can be disabled without accepting new settings (private=${privateContext})`, async () => {
+        const invalid = { ...config('legacy'), serverUrl: 'https://mnas:52314' };
+        const app = await background(privateContext ? {
+            tabs: [normalTab, privateTab],
+            session: { privateContexts: { '1': { settings: invalid, tabIds: [9], contextId: 'private-config' } } },
+        } : { local: { contextSettingsVersion: 1, contextSettings: { '0': invalid } } });
+        const tabId = privateContext ? 9 : 7;
+        const storeId = privateContext ? '1' : '0';
+        const status = await app.view(tabId);
+        assert.equal(status.settings.enabled, true);
+        assert.equal(app.context(storeId).socket, null);
+        const disabled = await app.request({
+            type: 'disableContext', tabId, contextId: status.contextId,
+            settings: config('must-not-be-applied'),
+        });
+        await app.settle();
+        assert.equal(disabled.settings.enabled, false);
+        assert.equal(disabled.settings.account, 'legacy');
+        assert.equal(disabled.settings.serverUrl, invalid.serverUrl);
+        const persisted = privateContext
+            ? app.state.session.privateContexts[storeId].settings : app.state.local.contextSettings[storeId];
+        assert.equal(persisted.enabled, false);
+        await assert.rejects(app.save({ enabled: true }, tabId), /ws:\/\//);
+        await app.save({ serverUrl: 'ws://mnas:52314', enabled: true }, tabId);
+        assert.ok(app.context(storeId).socket);
+        if (privateContext) assert.equal(app.context('0').settings.enabled, true);
+        await assert.rejects(app.request({ type: 'disableContext', tabId, contextId: 'stale-id' }), /Контекст/);
+    });
+}

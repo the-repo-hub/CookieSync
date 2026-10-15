@@ -75,10 +75,11 @@ function validateInputs() {
 
 function updateToggleState() {
     const isValid = validateInputs();
+    const canToggle = boundContext !== null && (confirmedEnabled || isValid);
 
-    enableToggle.disabled = toggleSaving || !isValid;
+    enableToggle.disabled = toggleSaving || !canToggle;
 
-    if (isValid && !toggleSaving) {
+    if (canToggle && !toggleSaving) {
         toggleContainer.classList.remove('disabled');
     } else {
         toggleContainer.classList.add('disabled');
@@ -179,26 +180,23 @@ function showError(error) {
 
 function saveSettings(enabled = confirmedEnabled, isToggle = false) {
     if (toggleSaving && !isToggle) return saveQueue;
-    if (!validateInputs()) {
+    const disabling = isToggle && !enabled;
+    if (!boundContext || (!disabling && !validateInputs())) {
         updateControls();
         return;
     }
 
-    const domains = cookieDomainInput.value
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean);
-
-    const settings = {
-        account: accountInput.value.trim(),
-        serverUrl: serverUrlInput.value.trim(),
-        cookieDomains: domains.length ? domains : ['.reso.ru'],
-        enabled,
-    };
-
     const request = {
-        type: 'saveSettings', tabId: boundTabId, contextId: boundContext.contextId, settings,
+        type: disabling ? 'disableContext' : 'saveSettings',
+        tabId: boundTabId, contextId: boundContext.contextId,
     };
+    if (!disabling) {
+        const domains = cookieDomainInput.value.split(',').map(value => value.trim()).filter(Boolean);
+        request.settings = {
+            account: accountInput.value.trim(), serverUrl: serverUrlInput.value.trim(),
+            cookieDomains: domains.length ? domains : ['.reso.ru'], enabled,
+        };
+    }
     actionVersion += 1;
     if (isToggle) {
         toggleSaving = true;
@@ -246,7 +244,7 @@ cookieDomainInput.addEventListener('blur', () => saveSettings());
 enableToggle.addEventListener('change', function () {
     const requestedEnabled = this.checked;
     this.checked = confirmedEnabled;
-    if (!validateInputs()) {
+    if (requestedEnabled && !validateInputs()) {
         updateControls();
         return;
     }
