@@ -12,6 +12,7 @@ const KEEPALIVE_ALARM = 'cookiesync-keepalive';
 const contexts = new Map();
 const retired = new Map();
 const tabStores = new Map();
+const pendingAuthMessages = new Set();
 let localSettings = {};
 let privateSessions = {};
 let recoverySessions = {};
@@ -56,6 +57,16 @@ function recoveryChanged(context) {
     if (record) recoverySessions[context.storeId] = record;
     else delete recoverySessions[context.storeId];
     return saveRecoverySessions();
+}
+
+/** Передаёт сообщения, пробудившие worker, в контекст до обработки его WebSocket. */
+function dispatchPendingAuthentication(context) {
+    for (const entry of pendingAuthMessages) {
+        if (context.tabIds.has(entry.tabId) && tabStores.get(entry.tabId) === context.storeId) {
+            pendingAuthMessages.delete(entry);
+            context.observeAuthentication(entry.tabId, entry.state).then(entry.resolve, entry.reject);
+        }
+    }
 }
 
 /**
@@ -119,6 +130,7 @@ async function reconcileSnapshot() {
     for (const rawStore of stores) {
         if (version !== tabsVersion) return false;
         const tabIds = rawStore.tabIds.filter(id => tabsById.has(id));
+        const officeTabIds = new Set(tabIds.filter(id => isOfficeUrl(tabsById.get(id).url)));
         const incognito = rawStore.incognito === true || rawStore.id === '1' || rawStore.id === 'firefox-private'
             || tabIds.some(id => tabsById.get(id).incognito === true);
         if (incognito && !tabIds.length) continue;
@@ -158,11 +170,15 @@ async function reconcileSnapshot() {
             // Lifecycle handlers must see a newly created context before the
             // first persistence await, including during worker restoration.
             for (const id of tabIds) tabStores.set(id, store.id);
-            context.restoreRecovery(recoverySessions[store.id]);
+            context.restoreRecovery(recoverySessions[store.id], officeTabIds);
+            dispatchPendingAuthentication(context);
             await recoveryChanged(context);
             if (version !== tabsVersion) return false;
         }
         context.tabIds = new Set(tabIds);
+        context.pruneAuthenticationTabs(officeTabIds);
+        for (const id of tabIds) tabStores.set(id, store.id);
+        dispatchPendingAuthentication(context);
         if (incognito) {
             privateSessions[store.id] = {
                 settings: context.settings, tabIds, contextId: context.contextId,
@@ -222,31 +238,22 @@ async function contextForRequest(request) {
 browser.runtime.onMessage.addListener((request, sender) => {
     if (request?.type === 'cookiesyncAuthState') {
         if (sender.id !== browser.runtime.id || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0) return;
-        try {
-            const url = new URL(sender.url);
-            if (!['http:', 'https:'].includes(url.protocol) || url.hostname !== 'office.reso.ru') return;
-        } catch (error) { return; }
+        if (!isOfficeUrl(sender.url)) return;
         const context = contexts.get(tabStores.get(sender.tab.id));
-        // DOM observations belong to settings/tab lifetime, not a WebSocket.
-        // On worker wake, capture ownership after session restoration and before
-        // later queued settings operations can reconfigure that context.
-        const owner = context ? Promise.resolve({ context, generation: context.settingsGeneration, revision: context.latestRevision })
-            : ready.then(() => {
-                const restored = contexts.get(tabStores.get(sender.tab.id));
-                return { context: restored, generation: restored?.settingsGeneration, revision: restored?.latestRevision };
+        // Install the queue barrier synchronously; a manager-wide reconcile must
+        // never let register/push or a later DOM query overtake this observation.
+        if (context) return context.observeAuthentication(sender.tab.id, request);
+        return new Promise((resolve, reject) => {
+            const entry = { tabId: sender.tab.id, state: request, resolve, reject };
+            pendingAuthMessages.add(entry);
+            enqueue(async () => {
+                await reconcile();
+                // Creation/association dispatched it, or the tab no longer exists.
+                if (pendingAuthMessages.delete(entry)) resolve(false);
+            }).catch(error => {
+                pendingAuthMessages.delete(entry);
+                reject(error);
             });
-        return enqueue(async () => {
-            const { context, generation, revision } = await owner;
-            await reconcile();
-            const current = () => context && contexts.get(tabStores.get(sender.tab.id)) === context
-                && context.settingsGeneration === generation;
-            if (current()) {
-                const tab = await browser.tabs.get(sender.tab.id);
-                try {
-                    if (new URL(tab.url).hostname !== 'office.reso.ru') return;
-                } catch (error) { return; }
-                if (current()) await context.authStateChanged(sender.tab.id, request, revision);
-            }
         });
     }
     if (!['getContext', 'saveSettings', 'disableContext'].includes(request?.type)) return;
@@ -293,12 +300,19 @@ browser.tabs.onCreated.addListener(tab => {
     if (context) {
         context.tabIds.add(tab.id);
         tabStores.set(tab.id, context.storeId);
+        dispatchPendingAuthentication(context);
     }
     enqueue(reconcile);
 });
 
 browser.tabs.onRemoved.addListener(tabId => {
     tabsVersion += 1;
+    for (const entry of pendingAuthMessages) {
+        if (entry.tabId === tabId) {
+            pendingAuthMessages.delete(entry);
+            entry.resolve(false);
+        }
+    }
     const storeId = tabStores.get(tabId);
     const context = contexts.get(storeId);
     tabStores.delete(tabId);
@@ -311,10 +325,9 @@ browser.tabs.onRemoved.addListener(tabId => {
 });
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    enqueue(async () => {
-        await reconcile();
-        contexts.get(tabStores.get(tabId))?.tabUpdated(tabId, changeInfo, tab);
-    });
+    if (changeInfo.url !== undefined) tabsVersion += 1;
+    contexts.get(tabStores.get(tabId))?.tabUpdated(tabId, changeInfo, tab);
+    enqueue(reconcile);
 });
 
 browser.alarms.onAlarm.addListener(alarm => {

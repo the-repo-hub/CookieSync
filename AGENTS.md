@@ -629,6 +629,12 @@ Persist the known revision with live login-tab observations in storage.session,
 including newer revisions learned from pushes. Restore it only for matching
 settings and surviving observed tabs. Queue DOM observations by settings/context
 lifetime, not socket generation; preserve the revision observed at receipt.
+Register each received authentication observation in its context's queue before
+any await. DOM query replies share that queue; cookie writes must drain it before
+each cookies.set so registration/push cannot overtake a pending login observation.
+Invalidate queued observations on tab departure and settings/context disposal.
+Restore recovery only for live tabs whose current URL is HTTP(S) office.reso.ru;
+prune obsolete observations during reconciliation as well as navigation events.
 Keep bounded UUID metadata for timed-out refresh requests on the same connection.
 A late idempotent acknowledgement can complete only its own recovery attempt;
 clear that metadata on recovery completion, disconnect, settings change/disposal.

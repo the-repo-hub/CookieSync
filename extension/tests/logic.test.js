@@ -6,6 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+    isOfficeUrl,
     normalizeDomain,
     parseDomains,
     cookieKey,
@@ -20,6 +21,16 @@ const {
     remarkExpectedRemoteChange,
     isExpectedRemoteChange,
 } = require('../logic.js');
+
+test('office URLs require the exact host and HTTP(S)', () => {
+    for (const url of ['https://office.reso.ru/', 'http://office.reso.ru/login', 'https://OFFICE.RESO.RU/']) {
+        assert.equal(isOfficeUrl(url), true);
+    }
+    for (const url of [undefined, '', 'not a URL', 'https://eviloffice.reso.ru/',
+        'https://sub.office.reso.ru/', 'https://office.reso.ru@example.com/', 'file://office.reso.ru/']) {
+        assert.equal(isOfficeUrl(url), false);
+    }
+});
 
 test('cookie expiry respects seconds, boundary and session semantics', () => {
     const now = 2000;

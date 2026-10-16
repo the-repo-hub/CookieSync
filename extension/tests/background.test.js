@@ -837,6 +837,47 @@ test('worker-waking login message is routed after restoring its context and revi
     assert.equal(resumed.sent.at(-1).command, 'refresh');
 });
 
+test('a worker-waking observation blocks registration even while bootstrap persistence is pending', async () => {
+    const app = await background();
+    await app.register(pair, true, '0', 5);
+    await app.authState(7, false);
+    let writes = 0;
+    const resumed = await background({
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+        beforeReady: async ({ browser, state, lookup }) => {
+            let release, signal;
+            const gate = new Promise(resolve => { release = resolve; });
+            const entered = new Promise(resolve => { signal = resolve; });
+            const save = browser.storage.session.set;
+            let once = true;
+            browser.storage.session.set = async values => {
+                if (once && values.reauthContexts) { once = false; signal(); await gate; }
+                return save(values);
+            };
+            const set = browser.cookies.set;
+            browser.cookies.set = async details => { writes += 1; return set(details); };
+            const message = { type: 'cookiesyncAuthState', documentId: 'doc-7', sequence: 2,
+                ready: true, loginVisible: true, authenticated: false };
+            state.authStateByTab = { 7: message };
+            const observing = browser.runtime.onMessage.emit(message, {
+                id: 'extension-test', url: normalTab.url, tab: normalTab, frameId: 0,
+            });
+            await entered;
+            const socket = lookup('0').socket;
+            const opening = socket.open();
+            try {
+                await socket.message({ uuid: socket.sent.at(-1).uuid, result: true, payload: pair, revision: 5 });
+                await flush();
+                assert.equal(writes, 0);
+            } finally {
+                release(); await Promise.all([observing, opening]);
+            }
+        },
+    });
+    assert.equal(writes, 0);
+    assert.equal(resumed.context().recovery.expectedRevision, 5);
+});
+
 test('persisted revision is rejected for changed settings or a different tab lifetime', async () => {
     const app = await background();
     await app.register(pair, true, '0', 5);
@@ -856,16 +897,78 @@ test('persisted revision is rejected for changed settings or a different tab lif
     assert.equal(resumed.context().authStates.size, 0);
 });
 
-/** Приостанавливает один снимок stores, чтобы детерминированно проверить очередь событий. */
-function holdStoreQuery(app) {
+for (const url of ['https://example.com/', undefined]) {
+    test(`restored recovery ignores a surviving tab without a current office URL (${url})`, async () => {
+        const app = await background();
+        await app.register(pair, true, '0', 5);
+        await app.authState(7, true); await app.authState(7, false);
+        const resumed = await background({
+            tabs: [{ ...normalTab, url }, { ...normalTab, id: 8 }],
+            local: structuredClone(app.state.local), session: structuredClone(app.state.session), cookies: pairB,
+        });
+        assert.equal(resumed.context().recovery, null);
+        assert.equal(resumed.context().authStates.has(7), false);
+        assert.equal(resumed.context().latestRevision, -1);
+        assert.equal('0' in resumed.state.session.reauthContexts, false);
+        await resumed.register(pair, true, '0', 5);
+        assert.equal(resumed.written.length, 2);
+        resumed.context().scheduleSync(); await resumed.fireTimer(1500);
+        assert.equal(resumed.sent.at(-1).command, 'set');
+        assert.deepEqual(resumed.sent.at(-1).payload, pairB);
+        assert.ok(resumed.authTabs.every(id => id === 8));
+    });
+}
+
+test('restoration prunes only obsolete observations and keeps another live office tab', async () => {
+    const secondTab = { ...normalTab, id: 8, url: 'http://office.reso.ru/' };
+    const app = await background({ tabs: [normalTab, secondTab] });
+    await app.register(pair, true, '0', 5);
+    await app.authState(8, false);
+    await app.authState(7, true);
+    const resumed = await background({
+        tabs: [{ ...normalTab, url: 'https://example.com/' }, secondTab],
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+        authStateByTab: structuredClone(app.state.authStateByTab),
+    });
+    assert.equal(resumed.context().recovery, null);
+    assert.equal(resumed.context().authStates.has(7), false);
+    assert.equal(resumed.context().authStates.has(8), true);
+    assert.equal(resumed.context().latestRevision, 5);
+    assert.deepEqual(resumed.state.session.reauthContexts['0'].observations.map(state => state.tabId), [8]);
+    await resumed.authState(8, true); await resumed.authState(8, false);
+    await resumed.register(pair, true, '0', 5);
+    assert.equal(resumed.written.length, 0, 'the surviving tab must keep its own new login fence');
+});
+
+test('private recovery for a tab on another site is pruned without copying regular state', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    await app.register(pair, true, '0', 100);
+    await app.authState(7, false);
+    await app.save(config('private_account'), 9);
+    await app.register(pairB, true, '1', 5);
+    await app.authState(9, true);
+    const resumed = await background({
+        tabs: [normalTab, { ...privateTab, url: 'https://example.com/' }],
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+    });
+    assert.equal(resumed.context('0').latestRevision, 100);
+    assert.equal(resumed.context('1').latestRevision, -1);
+    assert.equal(resumed.context('1').recovery, null);
+    assert.equal('1' in resumed.state.session.reauthContexts, false);
+    await resumed.register(pairB, true, '1', 5);
+    assert.ok(resumed.written.every(cookie => cookie.storeId === '1'));
+});
+
+/** Приостанавливает проверку URL одной auth-вкладки, сохраняя работу остальных контекстов. */
+function holdAuthTabQuery(app, tabId = 7) {
     let release, signal;
     const gate = new Promise(resolve => { release = resolve; });
     const entered = new Promise(resolve => { signal = resolve; });
-    const original = app.browser.cookies.getAllCookieStores;
+    const original = app.browser.tabs.get;
     let once = true;
-    app.browser.cookies.getAllCookieStores = async () => {
-        if (once) { once = false; signal(); await gate; }
-        return original();
+    app.browser.tabs.get = async id => {
+        if (once && id === tabId) { once = false; signal(); await gate; }
+        return original(id);
     };
     return { entered, release };
 }
@@ -875,7 +978,7 @@ test('queued login observation survives reconnect without changing its revision 
     const socket = await app.register(pair, true, '0', 5);
     await app.authState(7, false);
     await socket.close(); await app.settle();
-    const hold = holdStoreQuery(app);
+    const hold = holdAuthTabQuery(app);
     const observing = app.authState(7, true);
     await hold.entered;
     const reconnecting = app.fireTimer(5000);
@@ -896,13 +999,14 @@ test('a queued login observation cannot rebase onto a newer server push', async 
     const app = await background();
     const socket = await app.register(pair, true, '0', 5);
     await app.authState(7, false);
-    const hold = holdStoreQuery(app);
+    const hold = holdAuthTabQuery(app);
     const observing = app.authState(7, true);
     await hold.entered;
     await socket.message({ command: 'set', payload: pairB, revision: 6 });
-    await app.context().applyQueue;
+    assert.equal(app.written.length, 2, 'received observations are a barrier for cookie writes');
     hold.release();
     await observing;
+    await app.context().applyQueue;
     await app.authState(7, false);
     assert.equal(app.context().authStates.get(7).observedRevision, 5);
     assert.equal(app.context().latestRevision, 6);
@@ -911,12 +1015,108 @@ test('a queued login observation cannot rebase onto a newer server push', async 
     assert.equal(app.timers.size, 0);
 });
 
+for (const revision of [5, 6]) {
+    test(`registration and DOM polling cannot overtake a received login (revision=${revision})`, async () => {
+        const app = await background();
+        const socket = await app.register(pair, true, '0', 5);
+        await app.authState(7, false);
+        await socket.close(); await app.settle();
+        const hold = holdAuthTabQuery(app);
+        const observing = app.authState(7, true);
+        await hold.entered;
+        app.state.cookies = pairB;
+        app.written.length = 0;
+        await app.fireTimer(5000);
+        const registering = app.register(revision === 5 ? pair : pairB, true, '0', revision);
+        const polling = app.context().isAuthenticated({ id: '0', tabIds: [7] });
+        try {
+            await flush();
+            assert.equal(app.written.length, 0, 'the login validation must precede cookies.set');
+        } finally {
+            hold.release();
+            await Promise.all([observing, registering, polling]);
+        }
+        assert.equal(app.context().authStates.get(7).observedRevision, 5);
+        await app.authState(7, false);
+        if (revision === 5) {
+            assert.equal(app.written.length, 0);
+            await app.fireTimer(1500);
+            assert.equal(app.sent.at(-1).command, 'refresh');
+            assert.equal(app.sent.at(-1).expected_revision, 5);
+            assert.deepEqual(app.sent.at(-1).payload, pairB);
+        } else {
+            assert.equal(app.context().recovery, null);
+            assert.deepEqual(app.written.map(cookie => cookie.value), pairB.map(cookie => cookie.value));
+            assert.ok(app.sent.every(request => request.command === 'register'));
+            assert.equal(app.timers.size, 0);
+        }
+    });
+}
+
+test('a delayed auth observation blocks only its own cookie store', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    const socket = await app.register(pair, true, '0', 5);
+    await app.save(config('private_account'), 9);
+    const hold = holdAuthTabQuery(app);
+    const observing = app.authState(7, true);
+    await hold.entered;
+    try {
+        await socket.message({ command: 'set', payload: pair, revision: 5 });
+        await app.register(pairB, true, '1', 2);
+        assert.equal(app.written.filter(cookie => cookie.storeId === '0').length, 2);
+        assert.equal(app.written.filter(cookie => cookie.storeId === '1').length, 2);
+    } finally {
+        hold.release(); await observing; await app.context().applyQueue;
+    }
+    assert.equal(app.context().recovery.expectedRevision, 5);
+    assert.equal(app.context('1').recovery, null);
+});
+
+test('navigation invalidates pending observations even if the tab returns to office', async () => {
+    const app = await background();
+    await app.register(pair, true, '0', 5);
+    const hold = holdAuthTabQuery(app);
+    const observing = app.authState(7, true);
+    await hold.entered;
+    app.state.tabs = [{ ...normalTab, url: 'https://example.com/' }];
+    await app.browser.tabs.onUpdated.emit(7, { url: app.state.tabs[0].url }, app.state.tabs[0]);
+    app.state.tabs = [normalTab];
+    await app.browser.tabs.onUpdated.emit(7, { url: normalTab.url }, normalTab);
+    hold.release(); await observing;
+    assert.equal(app.context().authStates.size, 0);
+    assert.equal(app.context().recovery, null);
+    assert.equal('0' in app.state.session.reauthContexts, false);
+});
+
+test('changing settings cancels an old authentication barrier before its API call completes', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 5);
+    const hold = holdAuthTabQuery(app);
+    const observing = app.authState(7, true);
+    await hold.entered;
+    await socket.message({ command: 'set', payload: pair, revision: 5 });
+    const oldApplication = app.context().applyQueue;
+    try {
+        app.context().configure(config('new_account'));
+        app.state.authStateByTab[7] = { documentId: 'new-document', sequence: 1,
+            ready: true, loginVisible: false, authenticated: true };
+        await app.register(pairB, true, '0', 1);
+        await oldApplication;
+        assert.equal(app.context().settings.account, 'new_account');
+        assert.equal(app.context().recovery, null);
+        assert.deepEqual(app.written.slice(-2).map(cookie => cookie.value), pairB.map(cookie => cookie.value));
+        assert.equal(app.written.length, 4, 'the old pending application must not write');
+    } finally {
+        hold.release(); await observing;
+    }
+});
+
 for (const action of ['account', 'disable', 'dispose']) {
     test(`queued login observation is rejected after ${action}`, async () => {
         const app = await background();
         await app.register(pair, true, '0', 5);
         const context = app.context();
-        const hold = holdStoreQuery(app);
+        const hold = holdAuthTabQuery(app);
         const observing = app.authState(7, true);
         await hold.entered;
         if (action === 'account') context.configure(config('new_account'));

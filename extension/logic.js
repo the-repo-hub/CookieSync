@@ -14,6 +14,16 @@
 
 const SYNC_COOKIE_NAMES = ['ASP.NET_SessionId', 'ResoOffice60'];
 
+/** Разрешает наблюдение входа только на HTTP(S)-страницах самого office.reso.ru. */
+function isOfficeUrl(value) {
+    try {
+        const url = new URL(value);
+        return ['http:', 'https:'].includes(url.protocol) && url.hostname === 'office.reso.ru';
+    } catch (error) {
+        return false;
+    }
+}
+
 /**
  * Удаляет пробелы по краям ввода и дополняет настройки значениями по умолчанию.
  * @param {Object} [settings={}] Текущие или старые настройки с cookieDomain.
@@ -323,6 +333,7 @@ function isExpectedRemoteChange(
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+        isOfficeUrl,
         normalizeSyncSettings,
         validateSyncSettings,
         normalizeDomain,

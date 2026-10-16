@@ -24,6 +24,8 @@ class CookieSyncContext {
         this.notify = notify;
         this.recoveryChanged = recoveryChanged;
         this.authStates = new Map();
+        this.authQueue = Promise.resolve();
+        this.authTokens = new Map();
         this.recovery = null;
         this.alive = true;
         this.socket = null;
@@ -101,6 +103,10 @@ class CookieSyncContext {
             this.settingsGeneration += 1;
             this.latestRevision = -1;
             this.authStates.clear();
+            for (const token of this.authTokens.values()) token.cancel();
+            this.authTokens.clear();
+            // Tasks from an old settings lifetime must not delay a new account.
+            this.authQueue = Promise.resolve();
             this.clearRecovery().catch(error => console.warn('[CookieSync] Could not clear login recovery:', error));
         } else if (this.recovery) {
             // A suspended task still owns the old object. Its finally must not
@@ -415,6 +421,13 @@ class CookieSyncContext {
                 const store = await this.currentStore();
                 if (!store || !current()) return false;
                 for (const cookie of cookies) {
+                    // Runtime notifications and DOM query replies share this queue.
+                    // Drain received observations before *each* browser write.
+                    let observations;
+                    do {
+                        observations = this.authQueue;
+                        await observations;
+                    } while (observations !== this.authQueue);
                     if (!current()) return false;
                     // A valid pair can expire while queued or during an API await.
                     if (hasExpiredCookies(cookies)) return this.applyCookies([], revision);
@@ -472,21 +485,22 @@ class CookieSyncContext {
         };
     }
 
-    /** Восстанавливает fence ревизии только для совпавших настроек и живых вкладок. */
-    restoreRecovery(record) {
+    /** Восстанавливает fence только для совпавших настроек и актуальных office-вкладок. */
+    restoreRecovery(record, officeTabIds) {
         if (!record || !this.settings.enabled || record.account !== this.settings.account
             || record.serverUrl !== this.settings.serverUrl
             || JSON.stringify(record.cookieDomains) !== JSON.stringify(this.settings.cookieDomains)
             || (this.incognito && record.contextId !== this.contextId)) return;
         for (const state of record.observations || []) {
-            if (this.tabIds.has(state.tabId)) {
+            if (this.tabIds.has(state.tabId) && officeTabIds.has(state.tabId)) {
                 this.authStates.set(state.tabId, { ...state, retired: new Set(state.retired || []) });
             }
         }
         if (this.authStates.size && Number.isInteger(record.latestRevision) && record.latestRevision >= 0) {
             this.latestRevision = Math.max(this.latestRevision, record.latestRevision);
         }
-        if (this.tabIds.has(record.tabId) && Number.isInteger(record.expectedRevision) && record.expectedRevision >= 0) {
+        if (this.tabIds.has(record.tabId) && officeTabIds.has(record.tabId)
+            && Number.isInteger(record.expectedRevision) && record.expectedRevision >= 0) {
             this.recovery = { tabId: record.tabId, expectedRevision: record.expectedRevision,
                 ready: record.ready === true, inFlight: false };
         }
@@ -501,6 +515,63 @@ class CookieSyncContext {
         this.recovery = null;
         this.lateRefreshes.clear();
         return this.recoveryChanged(this);
+    }
+
+    /**
+     * Ставит наблюдение в очередь контекста сразу при получении, до первого await.
+     * Проверка актуальной вкладки не позволяет устаревшему документу восстановить
+     * recovery после навигации. Порядок общий для runtime-событий и опросов DOM.
+     * @returns {Promise<boolean>} Подтверждён ли вход актуальным наблюдением вкладки.
+     */
+    observeAuthentication(tabId, state, knownRevision = this.latestRevision) {
+        if (!this.alive || !this.settings.enabled || !this.tabIds.has(tabId)) return Promise.resolve(false);
+        const settingsGeneration = this.settingsGeneration;
+        let token = this.authTokens.get(tabId);
+        if (!token) {
+            token = {};
+            token.cancelled = new Promise(resolve => { token.cancel = resolve; });
+            this.authTokens.set(tabId, token);
+        }
+        const current = () => this.alive && this.settings.enabled && this.tabIds.has(tabId)
+            && this.settingsGeneration === settingsGeneration && this.authTokens.get(tabId) === token;
+        const next = this.authQueue.then(async () => {
+            if (!current()) return false;
+            let tab;
+            try {
+                tab = await Promise.race([browser.tabs.get(tabId), token.cancelled]);
+            } catch (error) {
+                console.debug('[CookieSync] Could not validate authentication tab:', error);
+                return false;
+            }
+            if (!current()) return false;
+            if (!isOfficeUrl(tab.url) || Boolean(tab.incognito) !== this.incognito
+                || (tab.cookieStoreId !== undefined && tab.cookieStoreId !== this.storeId)) {
+                this.tabRemoved(tabId);
+                return false;
+            }
+            await Promise.race([this.authStateChanged(tabId, state, knownRevision), token.cancelled]);
+            if (!current()) return false;
+            const observed = this.authStates.get(tabId);
+            if (typeof state.documentId === 'string') {
+                return state.ready === true && state.loginVisible === false && state.authenticated === true
+                    && observed?.documentId === state.documentId && observed.sequence >= state.sequence
+                    && observed.authenticated === true;
+            }
+            // Older content scripts return only authenticated. They cannot
+            // override a newer, explicit visible-dialog observation.
+            return state.authenticated === true && (!observed || observed.authenticated === true);
+        });
+        this.authQueue = next.catch(error => console.warn('[CookieSync] Could not process authentication observation:', error));
+        return next;
+    }
+
+    /** Удаляет наблюдения и recovery вкладок, отсутствующих в актуальном снимке office. */
+    pruneAuthenticationTabs(officeTabIds) {
+        const observed = new Set([...this.authStates.keys(), ...this.authTokens.keys()]);
+        if (this.recovery) observed.add(this.recovery.tabId);
+        for (const tabId of observed) {
+            if (!officeTabIds.has(tabId)) this.tabRemoved(tabId);
+        }
     }
 
     /**
@@ -558,6 +629,8 @@ class CookieSyncContext {
 
     /** Удаляет наблюдения закрытой/ушедшей из office вкладки и связанный recovery. */
     tabRemoved(tabId) {
+        this.authTokens.get(tabId)?.cancel();
+        this.authTokens.delete(tabId);
         this.authStates.delete(tabId);
         if (this.recovery?.tabId === tabId) {
             this.clearRecovery().catch(error => console.warn('[CookieSync] Could not clear closed login tab:', error));
@@ -601,8 +674,8 @@ class CookieSyncContext {
         for (const tab of candidates) {
             const reply = await this.readAuthentication(tab.id);
             if (!this.alive || generation !== this.generation) return false;
-            if (reply) await this.authStateChanged(tab.id, reply);
-            if (reply?.authenticated === true) authenticated = true;
+            if (reply && await this.observeAuthentication(tab.id, reply)) authenticated = true;
+            if (!this.alive || generation !== this.generation) return false;
         }
         if (authenticated) return true;
         console.warn(`[CookieSync] ${this.storeId}: вход в РЕСО Офис не подтверждён`);
@@ -714,16 +787,8 @@ class CookieSyncContext {
 
     /** Очищает вход при уходе из office и повторяет начальную отправку после загрузки. */
     tabUpdated(tabId, changeInfo, tab) {
-        if (tab.url) {
-            try {
-                if (new URL(tab.url).hostname !== 'office.reso.ru') this.tabRemoved(tabId);
-            } catch (error) { this.tabRemoved(tabId); }
-        }
+        if (tab.url && !isOfficeUrl(tab.url)) this.tabRemoved(tabId);
         if (!this.initialPending || !this.tabIds.has(tabId) || changeInfo.status !== 'complete' || !tab.url) return;
-        try {
-            if (new URL(tab.url).hostname === 'office.reso.ru') this.scheduleSync(true);
-        } catch (error) {
-            console.debug('[CookieSync] Ignoring tab without a valid URL');
-        }
+        if (isOfficeUrl(tab.url)) this.scheduleSync(true);
     }
 }
