@@ -528,8 +528,7 @@ class CookieSyncContext {
         const settingsGeneration = this.settingsGeneration;
         let token = this.authTokens.get(tabId);
         if (!token) {
-            token = {};
-            token.cancelled = new Promise(resolve => { token.cancel = resolve; });
+            token = createCancellationToken();
             this.authTokens.set(tabId, token);
         }
         const current = () => this.alive && this.settings.enabled && this.tabIds.has(tabId)
@@ -538,7 +537,7 @@ class CookieSyncContext {
             if (!current()) return false;
             let tab;
             try {
-                tab = await Promise.race([browser.tabs.get(tabId), token.cancelled]);
+                tab = await token.wait(browser.tabs.get(tabId));
             } catch (error) {
                 console.debug('[CookieSync] Could not validate authentication tab:', error);
                 return false;
@@ -549,7 +548,7 @@ class CookieSyncContext {
                 this.tabRemoved(tabId);
                 return false;
             }
-            await Promise.race([this.authStateChanged(tabId, state, knownRevision), token.cancelled]);
+            await token.wait(this.authStateChanged(tabId, state, knownRevision));
             if (!current()) return false;
             const observed = this.authStates.get(tabId);
             if (typeof state.documentId === 'string') {
@@ -703,7 +702,7 @@ class CookieSyncContext {
 
     /**
      * После подтверждения входа читает полную пару своего store и отправляет set/refresh.
-     * Ожидает applyQueue и повторно проверяет поколение после async-операций.
+     * Ожидает стабильную applyQueue и проверяет ревизию/очередь после чтения cookies.
      * Recovery владеет inFlight до finally; конфликт не переносит попытку на новую ревизию.
      * @param {boolean} [initialOnly=false] Отправлять только при initialPending.
      */
@@ -731,12 +730,30 @@ class CookieSyncContext {
                 recovery.inFlight = true;
                 submittedRecovery = recovery;
             }
-            await this.applyQueue;
-            if (!canSend() || this.recovery !== recovery) return;
+            let applications;
+            do {
+                applications = this.applyQueue;
+                await applications;
+                if (!canSend() || this.recovery !== recovery) return;
+            } while (applications !== this.applyQueue);
+            const revision = this.latestRevision;
             const lists = await Promise.all(this.settings.cookieDomains.map(domain => browser.cookies.getAll({
                 domain: normalizeDomain(domain), storeId: this.storeId,
             })));
-            if (!canSend() || this.recovery !== recovery) return;
+            // A login notification received during getAll also invalidates the
+            // earlier authentication verdict; process it before deciding to send.
+            let observations;
+            do {
+                observations = this.authQueue;
+                await observations;
+                if (!canSend() || this.recovery !== recovery) return;
+            } while (observations !== this.authQueue);
+            if (revision !== this.latestRevision || applications !== this.applyQueue) {
+                // Even a same-revision retry can overwrite the local snapshot.
+                // Discard it rather than echo pre-update cookies back via set.
+                console.debug('[CookieSync] Discarding cookie snapshot superseded by a server update');
+                return;
+            }
             const unique = new Map();
             for (const cookie of lists.flat()) unique.set(cookieKey(cookie), cookie);
             const payload = selectSyncCookiePair([...unique.values()], this.settings.cookieDomains).map(pickCookieFields);

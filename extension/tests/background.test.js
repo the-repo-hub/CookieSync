@@ -308,6 +308,120 @@ test('an expired older revision cannot clear a newer accepted pair', async () =>
     assert.equal(app.written.length, 2);
 });
 
+/** Удерживает уже полученный снимок cookies одного store до явного release. */
+function holdCookieRead(app, storeId = '0') {
+    let release, signal;
+    const gate = new Promise(resolve => { release = resolve; });
+    const entered = new Promise(resolve => { signal = resolve; });
+    const original = app.browser.cookies.getAll;
+    let once = true;
+    app.browser.cookies.getAll = async details => {
+        const snapshot = await original(details);
+        if (once && details.storeId === storeId) { once = false; signal(); await gate; }
+        return snapshot;
+    };
+    return { entered, release };
+}
+
+for (const source of ['push', 'response', 'same-revision']) {
+    test(`a ${source} invalidates a pending local cookie snapshot`, async () => {
+        const app = await background();
+        const socket = await app.register(pair, true, '0', 1);
+        let request;
+        if (source === 'response') {
+            app.context().scheduleSync(); await app.fireTimer(1500);
+            request = app.sent.at(-1);
+        }
+        app.state.cookies = pairB;
+        const hold = holdCookieRead(app);
+        app.context().scheduleSync(); await app.fireTimer(1500);
+        await hold.entered;
+        const before = app.sent.length;
+        try {
+            const winner = pair.map(cookie => ({ ...cookie, value: `${cookie.value}-winner` }));
+            const authoritative = source === 'same-revision' ? pair : winner;
+            await socket.message(source === 'response'
+                ? { uuid: request.uuid, result: true, accepted: false, payload: authoritative, revision: 2 }
+                : { command: 'set', payload: authoritative, revision: source === 'same-revision' ? 1 : 2 });
+            await app.context().applyQueue;
+            app.state.cookies = authoritative;
+        } finally {
+            hold.release(); await app.settle();
+        }
+        assert.equal(app.sent.length, before, 'the pre-update snapshot must not be sent');
+        assert.equal(app.context().pending.size, 0);
+        assert.equal(app.timers.size, 0);
+        const freshLocal = pair.map(cookie => ({ ...cookie, value: `${cookie.value}-fresh-local` }));
+        app.state.cookies = freshLocal;
+        await app.browser.cookies.onChanged.emit({ cookie: { ...freshLocal[0], storeId: '0' }, removed: false });
+        await app.fireTimer(1500);
+        assert.equal(app.sent.at(-1).command, 'set');
+        assert.deepEqual(app.sent.at(-1).payload, freshLocal);
+    });
+}
+
+test('local reads wait for applications appended while an earlier application is pending', async () => {
+    const app = await background();
+    const socket = await app.register(pair, true, '0', 1);
+    let release;
+    app.context().applyQueue = new Promise(resolve => { release = resolve; });
+    const originalSet = app.browser.cookies.set;
+    app.browser.cookies.set = async details => {
+        const result = await originalSet(details);
+        if (details.name === 'ResoOffice60') app.state.cookies = pairB;
+        return result;
+    };
+    app.context().scheduleSync(); await app.fireTimer(1500);
+    await socket.message({ command: 'set', payload: pairB, revision: 2 });
+    assert.equal(app.reads.length, 0);
+    release();
+    await app.context().applyQueue; await app.settle();
+    assert.equal(app.sent.at(-1).command, 'set');
+    assert.deepEqual(app.sent.at(-1).payload, pairB, 'only the fully applied pair may be read');
+});
+
+test('a private server update does not invalidate a regular-context local read', async () => {
+    const app = await background({ tabs: [normalTab, privateTab] });
+    await app.register(pair, true, '0', 5);
+    await app.save(config('private_account'), 9);
+    const privateSocket = await app.register(pair, true, '1', 5);
+    app.state.cookies = pairB;
+    const hold = holdCookieRead(app);
+    app.context().scheduleSync(); await app.fireTimer(1500);
+    await hold.entered;
+    try {
+        await privateSocket.message({ command: 'set', payload: pairB, revision: 100 });
+        await app.context('1').applyQueue;
+    } finally {
+        hold.release(); await app.settle();
+    }
+    assert.equal(app.sent.at(-1).command, 'set');
+    assert.equal(app.sent.at(-1).account, 'account_A');
+    assert.deepEqual(app.sent.at(-1).payload, pairB);
+});
+
+test('a login observation received during a local read is processed before sending its snapshot', async () => {
+    const app = await background();
+    await app.register(pair, true, '0', 1);
+    const read = holdCookieRead(app);
+    app.context().scheduleSync(); await app.fireTimer(1500);
+    await read.entered;
+    const auth = holdAuthTabQuery(app);
+    const observing = app.authState(7, true);
+    await auth.entered;
+    try {
+        read.release(); await app.settle();
+        assert.ok(app.sent.every(request => request.command === 'register'));
+    } finally {
+        auth.release(); await observing; await app.settle();
+    }
+    assert.ok(app.sent.every(request => request.command === 'register'));
+    app.state.cookies = pairB;
+    await app.authState(7, false); await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'refresh');
+    assert.equal(app.sent.at(-1).expected_revision, 1);
+});
+
 test('legacy settings migrate only to the regular context; private starts blank and disabled', async () => {
     const app = await background({ tabs: [normalTab, privateTab], local: config('old_regular') });
     assert.equal((await app.view(7)).settings.account, 'old_regular');

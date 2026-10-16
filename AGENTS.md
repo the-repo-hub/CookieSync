@@ -633,6 +633,12 @@ Register each received authentication observation in its context's queue before
 any await. DOM query replies share that queue; cookie writes must drain it before
 each cookies.set so registration/push cannot overtake a pending login observation.
 Invalidate queued observations on tab departure and settings/context disposal.
+Cancellation tokens must detach completed waiters; do not race every operation
+against a shared unresolved Promise that retains results for the whole tab lifetime.
+Before reading local cookies, drain the current cookie-application queue. After
+the read, drain received auth observations and discard the snapshot if its server
+revision or application queue changed. Never send stale pre-push cookies via set,
+even when cookie_update_interval is zero.
 Restore recovery only for live tabs whose current URL is HTTP(S) office.reso.ru;
 prune obsolete observations during reconciliation as well as navigation events.
 Keep bounded UUID metadata for timed-out refresh requests on the same connection.

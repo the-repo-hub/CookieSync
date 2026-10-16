@@ -14,6 +14,43 @@
 
 const SYNC_COOKIE_NAMES = ['ASP.NET_SessionId', 'ResoOffice60'];
 
+/**
+ * Создаёт токен отмены ожиданий без зависимости от браузерных API.
+ * wait возвращает результат операции либо undefined при отмене. Подписка на
+ * отмену удаляется при любом завершении ожидания; результаты завершённых API
+ * не удерживаются до закрытия вкладки. Сама операция API не отменяется.
+ */
+function createCancellationToken() {
+    let cancelled = false;
+    const listeners = new Set();
+    return {
+        cancel() {
+            if (cancelled) return;
+            cancelled = true;
+            for (const cancel of listeners) cancel();
+            listeners.clear();
+        },
+        wait(operation) {
+            return new Promise((resolve, reject) => {
+                let settled = false;
+                const finish = (complete, value) => {
+                    if (settled) return;
+                    settled = true;
+                    listeners.delete(onCancel);
+                    complete(value);
+                };
+                const onCancel = () => finish(resolve, undefined);
+                if (cancelled) onCancel();
+                else listeners.add(onCancel);
+                // Always consume the API's eventual rejection, even if cancelled.
+                Promise.resolve(operation).then(
+                    value => finish(resolve, value), error => finish(reject, error),
+                );
+            });
+        },
+    };
+}
+
 /** Разрешает наблюдение входа только на HTTP(S)-страницах самого office.reso.ru. */
 function isOfficeUrl(value) {
     try {
@@ -333,6 +370,7 @@ function isExpectedRemoteChange(
 
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+        createCancellationToken,
         isOfficeUrl,
         normalizeSyncSettings,
         validateSyncSettings,
