@@ -644,6 +644,11 @@ prune obsolete observations during reconciliation as well as navigation events.
 Keep bounded UUID metadata for timed-out refresh requests on the same connection.
 A late idempotent acknowledgement can complete only its own recovery attempt;
 clear that metadata on recovery completion, disconnect, settings change/disposal.
+If persisting an authentication observation fails, retain its deferred send intent.
+Retry on keepalive or a duplicate observation and schedule synchronization only
+after a successful save. Do not rebase the login revision, duplicate in-flight
+writes, or let another tab consume the deferred trigger. Retire obsolete intents
+on settings changes, tab departure, disposal or a winning server revision.
 
 Expected lifecycle:
 

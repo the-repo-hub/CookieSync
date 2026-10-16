@@ -1259,6 +1259,229 @@ test('an unsupported server reports an error without restoring the failed old se
     assert.equal(app.context().recovery.ready, true);
 });
 
+/** Завершает вход после исчерпанного debounce, отказав ровно одной session-записи. */
+async function failedLoginSave(incognito = false) {
+    const app = await background({ tabs: incognito ? [normalTab, privateTab] : [normalTab] });
+    const tabId = incognito ? 9 : 7;
+    const storeId = incognito ? '1' : '0';
+    if (incognito) await app.save(config('private_account'), tabId);
+    const socket = await app.register(pair, true, storeId, 5);
+    await app.authState(tabId, true);
+    app.state.cookies = pairB;
+    await app.browser.cookies.onChanged.emit({ cookie: { ...pairB[0], storeId }, removed: false });
+    await app.fireTimer(1500);
+    const save = app.browser.storage.session.set;
+    const failure = { remaining: 1, writes: 0 };
+    app.browser.storage.session.set = async values => {
+        if (values.reauthContexts) {
+            failure.writes += 1;
+            if (failure.remaining > 0) {
+                failure.remaining -= 1;
+                throw new Error('temporary session storage failure');
+            }
+        }
+        return save(values);
+    };
+    await assert.rejects(app.authState(tabId, false), /temporary session storage failure/);
+    await app.settle();
+    return { app, socket, failure, tabId, storeId, context: app.context(storeId) };
+}
+
+for (const incognito of [false, true]) {
+    test(`keepalive resumes a login whose final session write failed (private=${incognito})`, async () => {
+        const { app, socket, context, storeId } = await failedLoginSave(incognito);
+        assert.equal(context.recovery.ready, true);
+        assert.equal(context.recovery.expectedRevision, 5);
+        assert.equal(app.state.session.reauthContexts[storeId].ready, false);
+        assert.match(context.error, /сохранить состояние входа/);
+        assert.equal(app.timers.size, 0);
+        await app.browser.alarms.onAlarm.emit({ name: 'cookiesync-keepalive' });
+        await app.settle();
+        assert.equal(context.pendingAuthSave, null);
+        assert.equal(app.state.session.reauthContexts[storeId].ready, true);
+        assert.equal(context.error, '');
+        await app.fireTimer(1500);
+        const request = app.sent.at(-1);
+        assert.equal(request.command, 'refresh');
+        assert.equal(request.expected_revision, 5);
+        assert.deepEqual(request.payload, pairB);
+        assert.equal(request.account, incognito ? 'private_account' : 'account_A');
+        await socket.message({ uuid: request.uuid, result: true, accepted: true, payload: pairB, revision: 6 });
+        await app.settle();
+        assert.equal(context.recovery, null);
+        assert.equal(context.phase, 'online');
+        assert.equal(app.timers.size, 0);
+    });
+}
+
+test('a duplicate DOM observation retries unfinished persistence without rebasing the login', async () => {
+    const { app, context, tabId } = await failedLoginSave();
+    const recovery = context.recovery;
+    const sequence = app.state.authStateByTab[tabId].sequence;
+    await app.authState(tabId, false, { sequence });
+    await app.authState(tabId, false, { sequence });
+    assert.equal(context.recovery, recovery);
+    assert.equal(context.pendingAuthSave, null);
+    assert.equal([...app.timers.values()].filter(timer => timer.delay === 1500).length, 1);
+    await app.fireTimer(1500);
+    assert.equal(app.sent.filter(request => request.command === 'refresh').length, 1);
+    assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
+test('persistent session failures keep the retry intent and storage error without sending refresh', async () => {
+    const { app, context, failure, tabId } = await failedLoginSave();
+    failure.remaining = Infinity;
+    await app.browser.alarms.onAlarm.emit({ name: 'cookiesync-keepalive' }); await app.settle();
+    context.scheduleSync(); await app.fireTimer(1500);
+    assert.ok(app.sent.every(request => request.command === 'register'));
+    assert.equal(context.recovery.expectedRevision, 5);
+    assert.ok(context.pendingAuthSave);
+    assert.match(context.error, /сохранить состояние входа/);
+    assert.doesNotMatch(context.error, /версию сервера/);
+    assert.equal(app.timers.size, 0);
+    failure.remaining = 0;
+    const sequence = app.state.authStateByTab[tabId].sequence;
+    await app.authState(tabId, false, { sequence });
+    await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'refresh');
+    assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
+test('concurrent persistence retries share one write and one deferred synchronization', async () => {
+    const { app, context, failure } = await failedLoginSave();
+    let release;
+    app.state.recoveryWriteGate = new Promise(resolve => { release = resolve; });
+    const before = failure.writes;
+    const first = context.retryPendingAuthSave();
+    const second = context.retryPendingAuthSave();
+    assert.equal(first, second);
+    await flush();
+    assert.equal(failure.writes, before + 1);
+    release(); await Promise.all([first, second]); await app.settle();
+    assert.equal(failure.writes, before + 1);
+    assert.equal([...app.timers.values()].filter(timer => timer.delay === 1500).length, 1);
+});
+
+for (const closeObserver of [false, true]) {
+    test(`another tab's successful metadata write preserves the failed login trigger (close=${closeObserver})`, async () => {
+        const { app, context } = await failedLoginSave();
+        const otherTab = { ...normalTab, id: 8 };
+        app.state.tabs.push(otherTab);
+        await app.browser.tabs.onCreated.emit(otherTab); await app.settle();
+        let release;
+        app.state.recoveryWriteGate = new Promise(resolve => { release = resolve; });
+        const observing = app.authState(8, false);
+        await flush();
+        assert.equal(context.pendingAuthSave.tabId, 7, 'the pending send still belongs to the login tab');
+        if (closeObserver) {
+            app.state.tabs = [normalTab];
+            await app.browser.tabs.onRemoved.emit(8);
+        }
+        release(); await observing; await app.settle();
+        assert.equal(context.pendingAuthSave, null);
+        await app.fireTimer(1500);
+        assert.equal(app.sent.at(-1).command, 'refresh');
+        assert.equal(app.sent.at(-1).expected_revision, 5);
+    });
+}
+
+for (const action of ['account', 'disable', 'close-tab', 'navigate', 'peer-update']) {
+    test(`a pending persistence retry is retired after ${action}`, async () => {
+        const { app, context, socket } = await failedLoginSave();
+        if (action === 'account') await app.save({ account: 'new_account' });
+        if (action === 'disable') await app.save({ enabled: false });
+        if (action === 'close-tab') {
+            app.state.tabs = [];
+            await app.browser.tabs.onRemoved.emit(7);
+        }
+        if (action === 'navigate') {
+            app.state.tabs = [{ ...normalTab, url: 'https://example.com/' }];
+            await app.browser.tabs.onUpdated.emit(7, { url: app.state.tabs[0].url }, app.state.tabs[0]);
+        }
+        if (action === 'peer-update') await socket.message({ command: 'set', payload: pairB, revision: 6 });
+        await app.settle();
+        assert.equal(context.pendingAuthSave, null);
+        assert.equal(context.recovery, null);
+        context.keepAlive(); await app.settle();
+        assert.ok(app.sent.every(request => request.command === 'register'));
+        assert.equal([...app.timers.values()].filter(timer => timer.delay === 1500).length, 0);
+    });
+}
+
+test('a stale persistence completion cannot schedule login for a changed account', async () => {
+    const { app, context } = await failedLoginSave();
+    let release;
+    app.state.recoveryWriteGate = new Promise(resolve => { release = resolve; });
+    const retry = context.retryPendingAuthSave();
+    await flush();
+    context.configure(config('new_account'));
+    release(); await retry; await app.settle();
+    assert.equal(context.pendingAuthSave, null);
+    assert.equal(context.recovery, null);
+    assert.equal(context.phase, 'connecting');
+    assert.equal(app.timers.size, 0);
+    assert.ok(app.sent.every(request => request.command === 'register'));
+});
+
+test('a new visible login cannot inherit the send trigger from an older persistence retry', async () => {
+    const { app, context } = await failedLoginSave();
+    let release;
+    app.state.recoveryWriteGate = new Promise(resolve => { release = resolve; });
+    const retry = context.retryPendingAuthSave();
+    const observing = app.authState(7, true);
+    await flush();
+    assert.equal(context.recovery.ready, false);
+    release(); await Promise.all([retry, observing]); await app.settle();
+    assert.equal(context.pendingAuthSave, null);
+    assert.equal(context.recovery.ready, false);
+    assert.equal(app.timers.size, 0);
+    assert.ok(app.sent.every(request => request.command === 'register'));
+    await app.authState(7, false); await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'refresh');
+    assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
+test('closing the last private tab discards a failed persistence retry and its session record', async () => {
+    const { app, context } = await failedLoginSave(true);
+    app.state.tabs = [normalTab];
+    await app.browser.tabs.onRemoved.emit(9); await app.settle();
+    context.keepAlive(); await app.settle();
+    assert.equal(context.alive, false);
+    assert.equal(context.pendingAuthSave, null);
+    assert.equal(context.recovery, null);
+    assert.equal('1' in app.state.session.reauthContexts, false);
+    assert.equal('1' in app.state.session.privateContexts, false);
+    assert.ok(app.sent.every(request => request.command === 'register'));
+});
+
+test('worker recreation recovers a login after a failed final persistence write', async () => {
+    const { app } = await failedLoginSave();
+    const resumed = await background({
+        local: structuredClone(app.state.local), session: structuredClone(app.state.session),
+        authStateByTab: structuredClone(app.state.authStateByTab), cookies: pairB,
+    });
+    await resumed.register(pair, true, '0', 5);
+    assert.equal(resumed.written.length, 0);
+    await resumed.fireTimer(1500);
+    assert.equal(resumed.sent.at(-1).command, 'refresh');
+    assert.equal(resumed.sent.at(-1).expected_revision, 5);
+    assert.deepEqual(resumed.sent.at(-1).payload, pairB);
+});
+
+test('reconnect preserves a failed save intent without sharing the old refresh ownership', async () => {
+    const { app, socket, context } = await failedLoginSave();
+    const oldRecovery = context.recovery;
+    await socket.close(); await app.settle();
+    context.keepAlive(); await app.settle();
+    assert.notEqual(context.recovery, oldRecovery);
+    assert.equal(context.pendingAuthSave, null);
+    await app.register(pair, true, '0', 5);
+    assert.equal(context.recovery.expectedRevision, 5);
+    await app.fireTimer(1500);
+    assert.equal(app.sent.at(-1).command, 'refresh');
+    assert.equal(app.sent.at(-1).expected_revision, 5);
+});
+
 test('private revision survives only the same live private lifetime', async () => {
     const app = await background({ tabs: [normalTab, privateTab] });
     await app.save(config('private_account'), 9);

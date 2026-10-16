@@ -26,6 +26,7 @@ class CookieSyncContext {
         this.authStates = new Map();
         this.authQueue = Promise.resolve();
         this.authTokens = new Map();
+        this.pendingAuthSave = null;
         this.recovery = null;
         this.alive = true;
         this.socket = null;
@@ -141,9 +142,13 @@ class CookieSyncContext {
             && (!this.incognito || store.tabIds.some(id => this.tabIds.has(id))));
     }
 
-    /** Восстанавливает соединение включённого контекста при пробуждении alarm. */
+    /** Восстанавливает соединение и незавершённое сохранение входа при пробуждении alarm. */
     keepAlive() {
-        if (this.alive && this.settings.enabled) this.connect();
+        if (!this.alive || !this.settings.enabled) return;
+        this.connect();
+        this.retryPendingAuthSave().catch(error => {
+            console.warn('[CookieSync] Could not retry login state persistence:', error);
+        });
     }
 
     /** Планирует единственный reconnect через 5 секунд для включённого контекста. */
@@ -513,6 +518,7 @@ class CookieSyncContext {
             this.syncTimer = null;
         }
         this.recovery = null;
+        this.pendingAuthSave = null;
         this.lateRefreshes.clear();
         return this.recoveryChanged(this);
     }
@@ -573,6 +579,55 @@ class CookieSyncContext {
         }
     }
 
+    /** Проверяет владельца отложенной записи, включая время жизни настроек и наблюдения. */
+    isPendingAuthSaveCurrent(pending) {
+        return pending && this.pendingAuthSave === pending && this.alive && this.settings.enabled
+            && this.settingsGeneration === pending.settingsGeneration && this.tabIds.has(pending.tabId)
+            && this.authStates.get(pending.tabId) === pending.state;
+    }
+
+    /** Нужна ли после сохранения отправка именно этой, всё ещё актуальной попытки входа. */
+    shouldSyncAfterAuthSave(pending) {
+        if (!pending?.shouldSync) return false;
+        return pending.recoveryRevision !== undefined
+            ? this.recovery?.tabId === pending.recoveryTabId
+                && this.recovery.expectedRevision === pending.recoveryRevision && this.recovery.ready
+            : !this.recovery && this.initialPending;
+    }
+
+    /**
+     * Повторяет незавершённую запись текущего наблюдения, не меняя ревизию входа.
+     * Только успешная запись разрешает отложенный запуск синхронизации. Keepalive
+     * и дубликат DOM-события могут повторить запись; параллельные вызовы разделяют
+     * один Promise. Старое завершение не затрагивает новую вкладку/попытку/настройки.
+     */
+    retryPendingAuthSave() {
+        const pending = this.pendingAuthSave;
+        const current = () => this.isPendingAuthSaveCurrent(pending);
+        if (!current()) {
+            if (this.pendingAuthSave === pending) this.pendingAuthSave = null;
+            return Promise.resolve();
+        }
+        if (pending.saving) return pending.saving;
+        const failureDetail = 'Не удалось сохранить состояние входа. Повторим при следующей проверке связи';
+        pending.saving = Promise.resolve().then(() => {
+            if (current()) return this.recoveryChanged(this);
+        }).then(() => {
+            if (!current()) return;
+            this.pendingAuthSave = null;
+            if (this.registered && this.phase === 'error' && this.detail === failureDetail) {
+                this.setPhase('online');
+            }
+            if (this.shouldSyncAfterAuthSave(pending)) this.scheduleSync(pending.recoveryRevision === undefined);
+        }).catch(error => {
+            if (current()) {
+                this.setPhase('error', failureDetail);
+            }
+            throw error;
+        }).finally(() => { pending.saving = null; });
+        return pending.saving;
+    }
+
     /**
      * Принимает упорядоченное наблюдение DOM от вкладки данного контекста.
      * Видимый логин закрепляет текущую ревизию; его исчезновение разрешает refresh.
@@ -589,7 +644,10 @@ class CookieSyncContext {
             || !Number.isInteger(state.sequence) || state.sequence < 1) return;
         const previous = this.authStates.get(tabId);
         if (previous?.documentId === state.documentId && state.sequence <= previous.sequence
-            && !(previous.waitingForRevision && state.loginVisible && this.latestRevision >= 0)) return;
+            && !(previous.waitingForRevision && state.loginVisible && this.latestRevision >= 0)) {
+            if (this.pendingAuthSave?.tabId === tabId) await this.retryPendingAuthSave();
+            return;
+        }
         if (previous?.retired.has(state.documentId)) return;
         const retired = previous?.retired || new Set();
         if (previous && previous.documentId !== state.documentId) retired.add(previous.documentId);
@@ -622,12 +680,23 @@ class CookieSyncContext {
         } else if (previous?.loginVisible && this.initialPending) {
             shouldSync = true;
         }
-        await this.recoveryChanged(this);
-        if (shouldSync && this.alive && settingsGeneration === this.settingsGeneration) this.scheduleSync();
+        // Another office tab's observation also persists the complete snapshot.
+        // It must not consume a still-pending send belonging to the login tab.
+        const deferred = this.pendingAuthSave;
+        const carry = this.isPendingAuthSaveCurrent(deferred) && this.shouldSyncAfterAuthSave(deferred);
+        this.pendingAuthSave = {
+            tabId: !shouldSync && carry ? deferred.tabId : tabId,
+            state: !shouldSync && carry ? deferred.state : this.authStates.get(tabId), settingsGeneration,
+            shouldSync: shouldSync || carry || (this.initialPending && state.authenticated),
+            recoveryTabId: this.recovery?.tabId, recoveryRevision: this.recovery?.expectedRevision,
+            saving: null,
+        };
+        await this.retryPendingAuthSave();
     }
 
     /** Удаляет наблюдения закрытой/ушедшей из office вкладки и связанный recovery. */
     tabRemoved(tabId) {
+        if (this.pendingAuthSave?.tabId === tabId) this.pendingAuthSave = null;
         this.authTokens.get(tabId)?.cancel();
         this.authTokens.delete(tabId);
         this.authStates.delete(tabId);
@@ -771,6 +840,7 @@ class CookieSyncContext {
             this.updateSyncStatus(response, Boolean(recovery));
         } catch (error) {
             console.warn(`[CookieSync] Cookie sync failed for ${this.storeId}:`, error);
+            if (current() && this.pendingAuthSave) return; // Keep the storage-specific error and retry intent.
             if (current() && recovery && this.recovery === recovery) this.setPhase('error', `Обновление после входа не выполнено: ${error.message}. Проверьте версию сервера`);
             else if (current() && this.initialPending) this.setPhase('online', 'Cookies не отправлены: ошибка чтения или отправки');
         } finally {
